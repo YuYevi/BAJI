@@ -1,0 +1,10 @@
+{
+    "manufacturer": "baji",
+    "target": "esp32s3",
+    "builds": [
+        {
+            "name": "BAJI",
+            "sdkconfig_append": []
+        }
+    ]
+}
