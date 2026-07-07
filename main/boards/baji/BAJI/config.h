@@ -140,6 +140,7 @@
 #define QSPI_PIN_NUM_LCD_DATA1          GPIO_NUM_13     // LCD数据1引脚
 #define QSPI_PIN_NUM_LCD_DATA2          GPIO_NUM_14     // LCD数据2引脚
 #define QSPI_PIN_NUM_LCD_DATA3          GPIO_NUM_9      // LCD数据3引脚
+#define QSPI_PIN_NUM_LCD_TE             GPIO_NUM_8      // LCD TE同步引脚
 #define QSPI_PIN_NUM_LCD_RST            GPIO_NUM_NC     // LCD复位引脚
 #define QSPI_PIN_NUM_LCD_BL             GPIO_NUM_15     // LCD背光引脚
 

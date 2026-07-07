@@ -13,6 +13,7 @@
 #include "assets/lang_config.h"
 #include "abnormal_reporter.h"
 #include "mqtt_control.h"
+#include <esp_log.h>
 #include <esp_sleep.h>
 #include <esp_system.h>
 #include <freertos/FreeRTOS.h>
@@ -25,8 +26,8 @@ enum class PowerUiHint {
 
 class PowerManager {
 private:
-    esp_timer_handle_t timer_handle_;
-    esp_timer_handle_t power_timer_handle_;
+    esp_timer_handle_t timer_handle_ = nullptr;
+    esp_timer_handle_t power_timer_handle_ = nullptr;
     std::function<void(bool)> on_charging_status_changed_;
     std::function<void(bool)> on_low_battery_status_changed_;
 
@@ -41,11 +42,14 @@ private:
     uint16_t charge_state_settle_seconds_ = 0;
     uint16_t battery_level_step_seconds_ = 0;
     uint16_t near_full_charge_seconds_ = 0;
-    adc_oneshot_unit_handle_t adc_handle_;
+    uint16_t charge_state_debounce_seconds_ = 0;
+    adc_oneshot_unit_handle_t adc_handle_ = nullptr;
     const int kBatteryAdcInterval = 30; 
     const int kBatteryAdcDataCount = 10;
     const int kLowBatteryLevel = 20;
+    const int kLowBatteryRecoverLevel = 25;
     const int kChargeStateSettleTime = 12;
+    const int kChargeStateDebounceTime = 2;
     const int kChargingLevelStepInterval = 12;
     const int kDischargingLevelStepInterval = 20;
     const int kNearFullAdcThreshold = 2380;
@@ -53,6 +57,7 @@ private:
     const int kNearFullLevel = 95;
 
     bool new_charging_status = false;
+    bool pending_charging_status_ = false;
     bool shutdown_requested_ = false;
     bool shutdown_first_ = true;
     bool power_key_raw_pressed_ = false;
@@ -193,26 +198,76 @@ private:
         }
     }
 
-    void CheckBatteryStatus() {
-#if POWER_CHARGE_DETECT_USE_GPIO
-        new_charging_status = (gpio_get_level(charging_pin_) == POWER_USB_VBUS_ACTIVE_LEVEL);
-#else
-        int usb_usb_adc_value0;
-        ESP_ERROR_CHECK(adc_oneshot_read(adc_handle_, POWER_USBIN_ADC_CHANNEL, &usb_usb_adc_value0));
-        new_charging_status = (1500 < usb_usb_adc_value0 && usb_usb_adc_value0 < 4000);
-#endif
+    bool ReadAdcChannel(adc_channel_t channel, int& adc_value) {
+        if (adc_handle_ == nullptr) {
+            ESP_LOGW("PowerManager", "ADC handle is not ready");
+            return false;
+        }
 
-        if (new_charging_status != is_charging_) {
-            is_charging_ = new_charging_status;
-            adc_values_.clear();
-            ticks_ = 0;
-            charge_state_settle_seconds_ = kChargeStateSettleTime;
-            battery_level_step_seconds_ = 0;
-            near_full_charge_seconds_ = 0;
-            ReadBatteryAdcData();
-            if (on_charging_status_changed_) {
-                on_charging_status_changed_(is_charging_);
+        esp_err_t err = adc_oneshot_read(adc_handle_, channel, &adc_value);
+        if (err != ESP_OK) {
+            ESP_LOGW("PowerManager", "ADC read channel %d failed: %s",
+                     static_cast<int>(channel), esp_err_to_name(err));
+            return false;
+        }
+        return true;
+    }
+
+    bool ReadChargingStatus(bool& charging) {
+#if POWER_CHARGE_DETECT_USE_GPIO
+        charging = (gpio_get_level(charging_pin_) == POWER_USB_VBUS_ACTIVE_LEVEL);
+        return true;
+#else
+        int usb_adc_value = 0;
+        if (!ReadAdcChannel(POWER_USBIN_ADC_CHANNEL, usb_adc_value)) {
+            return false;
+        }
+        charging = (1500 < usb_adc_value && usb_adc_value < 4000);
+        return true;
+#endif
+    }
+
+    void ApplyChargingStatus(bool charging) {
+        is_charging_ = charging;
+        new_charging_status = charging;
+        pending_charging_status_ = charging;
+        charge_state_debounce_seconds_ = 0;
+        adc_values_.clear();
+        ticks_ = 0;
+        charge_state_settle_seconds_ = kChargeStateSettleTime;
+        battery_level_step_seconds_ = 0;
+        near_full_charge_seconds_ = 0;
+        ReadBatteryAdcData();
+        if (on_charging_status_changed_) {
+            on_charging_status_changed_(is_charging_);
+        }
+    }
+
+    void CheckBatteryStatus() {
+        bool raw_charging_status = false;
+        if (!ReadChargingStatus(raw_charging_status)) {
+            return;
+        }
+
+        if (raw_charging_status != is_charging_) {
+            if (raw_charging_status != pending_charging_status_) {
+                pending_charging_status_ = raw_charging_status;
+                charge_state_debounce_seconds_ = 1;
+            } else if (charge_state_debounce_seconds_ < 0xFFFF) {
+                charge_state_debounce_seconds_++;
             }
+
+            if (charge_state_debounce_seconds_ >= kChargeStateDebounceTime) {
+                ApplyChargingStatus(raw_charging_status);
+                return;
+            }
+        } else {
+            new_charging_status = is_charging_;
+            pending_charging_status_ = is_charging_;
+            charge_state_debounce_seconds_ = 0;
+        }
+
+        if (raw_charging_status != is_charging_) {
             return;
         }
 
@@ -251,7 +306,9 @@ private:
 
     void ReadBatteryAdcData() {
         int adc_value;
-        ESP_ERROR_CHECK(adc_oneshot_read(adc_handle_, POWER_BATTERY_ADC_CHANNEL, &adc_value));
+        if (!ReadAdcChannel(POWER_BATTERY_ADC_CHANNEL, adc_value)) {
+            return;
+        }
 
         
         adc_values_.push_back(adc_value);
@@ -335,7 +392,9 @@ private:
 
         
         if (adc_values_.size() >= kBatteryAdcDataCount) {
-            bool new_low_battery_status = battery_level_ <= kLowBatteryLevel;
+            bool new_low_battery_status = is_low_battery_
+                ? battery_level_ < kLowBatteryRecoverLevel
+                : battery_level_ <= kLowBatteryLevel;
             if (new_low_battery_status != is_low_battery_) {
                 is_low_battery_ = new_low_battery_status;
                 if (on_low_battery_status_changed_) {
@@ -494,20 +553,6 @@ public:
         ESP_ERROR_CHECK(esp_timer_create(&power_timer_args, &power_timer_handle_));
         ESP_ERROR_CHECK(esp_timer_start_periodic(power_timer_handle_, POWER_KEY_SCAN_INTERVAL_MS * 1000));
 
-        
-        esp_timer_create_args_t timer_args = {
-            .callback = [](void* arg) {
-                PowerManager* self = static_cast<PowerManager*>(arg);
-                self->CheckBatteryStatus();
-            },
-            .arg = this,
-            .dispatch_method = ESP_TIMER_TASK,
-            .name = "battery_check_timer",
-            .skip_unhandled_events = true,
-        };
-        ESP_ERROR_CHECK(esp_timer_create(&timer_args, &timer_handle_));
-        ESP_ERROR_CHECK(esp_timer_start_periodic(timer_handle_, 1000000));
-
         adc_oneshot_unit_init_cfg_t init_config = {
             .unit_id = POWER_CBS_ADC_UNIT,
             .ulp_mode = ADC_ULP_MODE_DISABLE,
@@ -522,6 +567,27 @@ public:
 #if !POWER_CHARGE_DETECT_USE_GPIO
         ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle_, POWER_USBIN_ADC_CHANNEL, &chan_config));
 #endif
+
+        bool initial_charging_status = false;
+        if (ReadChargingStatus(initial_charging_status)) {
+            is_charging_ = initial_charging_status;
+            new_charging_status = initial_charging_status;
+            pending_charging_status_ = initial_charging_status;
+        }
+        ReadBatteryAdcData();
+
+        esp_timer_create_args_t timer_args = {
+            .callback = [](void* arg) {
+                PowerManager* self = static_cast<PowerManager*>(arg);
+                self->CheckBatteryStatus();
+            },
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "battery_check_timer",
+            .skip_unhandled_events = true,
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&timer_args, &timer_handle_));
+        ESP_ERROR_CHECK(esp_timer_start_periodic(timer_handle_, 1000000));
     }
 
     ~PowerManager() {
@@ -539,10 +605,6 @@ public:
     }
 
     bool IsCharging() {
-        
-        if (battery_level_ == 100) {
-            return false;
-        }
         return is_charging_;
     }
 

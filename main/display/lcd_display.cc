@@ -42,6 +42,8 @@ LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
 LV_FONT_DECLARE(font_awesome_30_4);
 
+extern "C" void baji_lcd_te_attach_display(lv_display_t* display) __attribute__((weak));
+
 namespace {
 bool ShouldEnterSmartWatchAiChat(DeviceState state) {
     return state == kDeviceStateConnecting ||
@@ -339,6 +341,9 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
 
     // 添加显示设备
     display_ = lvgl_port_add_disp(&display_cfg);
+    if (display_ != nullptr && baji_lcd_te_attach_display) {
+        baji_lcd_te_attach_display(display_);
+    }
     if (display_ == nullptr) {
         return;
     }

@@ -16,7 +16,9 @@
 #include <atomic>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
+#include <driver/gpio.h>
 #include <driver/i2c_master.h>
 #include <driver/ledc.h>
 #include <esp_lcd_panel_io.h>
@@ -54,6 +56,142 @@
 #define LCD_OPCODE_WRITE_CMD    (0x02ULL)
 #define LCD_OPCODE_READ_CMD     (0x03ULL)
 #define LCD_OPCODE_WRITE_COLOR  (0x32ULL)
+
+#ifndef BAJI_LCD_TE_WAIT_TIMEOUT_MS
+#define BAJI_LCD_TE_WAIT_TIMEOUT_MS 20
+#endif
+
+#ifndef BAJI_LCD_TE_MAX_CONSECUTIVE_TIMEOUTS
+#define BAJI_LCD_TE_MAX_CONSECUTIVE_TIMEOUTS 10
+#endif
+
+static SemaphoreHandle_t s_baji_lcd_te_sem = nullptr;
+static std::atomic<bool> s_baji_lcd_te_ready{false};
+static std::atomic<bool> s_baji_lcd_te_waited_this_round{false};
+static std::atomic<int> s_baji_lcd_te_timeout_count{0};
+
+static void Baji185LcdTeIsr(void* arg)
+{
+    BaseType_t need_yield = pdFALSE;
+    SemaphoreHandle_t sem = s_baji_lcd_te_sem;
+    if (sem != nullptr) {
+        xSemaphoreGiveFromISR(sem, &need_yield);
+    }
+    if (need_yield == pdTRUE) {
+        portYIELD_FROM_ISR();
+    }
+}
+
+static void Baji185InitLcdTeSync()
+{
+    if (s_baji_lcd_te_ready.load()) {
+        return;
+    }
+
+    if (s_baji_lcd_te_sem == nullptr) {
+        s_baji_lcd_te_sem = xSemaphoreCreateBinary();
+        if (s_baji_lcd_te_sem == nullptr) {
+            ESP_LOGW(TAG, "LCD TE sync disabled: semaphore allocation failed");
+            return;
+        }
+    }
+
+    gpio_config_t te_conf = {};
+    te_conf.pin_bit_mask = 1ULL << QSPI_PIN_NUM_LCD_TE;
+    te_conf.mode = GPIO_MODE_INPUT;
+    te_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    te_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    te_conf.intr_type = GPIO_INTR_POSEDGE;
+    esp_err_t ret = gpio_config(&te_conf);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "LCD TE sync disabled: gpio_config failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ret = gpio_install_isr_service(0);
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "LCD TE sync disabled: gpio_install_isr_service failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    gpio_intr_disable(QSPI_PIN_NUM_LCD_TE);
+    ret = gpio_isr_handler_add(QSPI_PIN_NUM_LCD_TE, Baji185LcdTeIsr, nullptr);
+    if (ret == ESP_ERR_INVALID_STATE) {
+        gpio_isr_handler_remove(QSPI_PIN_NUM_LCD_TE);
+        ret = gpio_isr_handler_add(QSPI_PIN_NUM_LCD_TE, Baji185LcdTeIsr, nullptr);
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "LCD TE sync disabled: gpio_isr_handler_add failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    while (xSemaphoreTake(s_baji_lcd_te_sem, 0) == pdTRUE) {
+    }
+    ESP_ERROR_CHECK(gpio_intr_enable(QSPI_PIN_NUM_LCD_TE));
+    s_baji_lcd_te_timeout_count.store(0);
+    s_baji_lcd_te_waited_this_round.store(false);
+    s_baji_lcd_te_ready.store(true);
+    ESP_LOGI(TAG, "LCD TE sync enabled on GPIO%d", QSPI_PIN_NUM_LCD_TE);
+}
+
+static bool Baji185WaitLcdTePulse()
+{
+    if (!s_baji_lcd_te_ready.load() || s_baji_lcd_te_sem == nullptr) {
+        return false;
+    }
+
+    while (xSemaphoreTake(s_baji_lcd_te_sem, 0) == pdTRUE) {
+    }
+
+    if (xSemaphoreTake(s_baji_lcd_te_sem, pdMS_TO_TICKS(BAJI_LCD_TE_WAIT_TIMEOUT_MS)) == pdTRUE) {
+        s_baji_lcd_te_timeout_count.store(0);
+        return true;
+    }
+
+    int timeout_count = s_baji_lcd_te_timeout_count.fetch_add(1) + 1;
+    if (timeout_count >= BAJI_LCD_TE_MAX_CONSECUTIVE_TIMEOUTS) {
+        gpio_intr_disable(QSPI_PIN_NUM_LCD_TE);
+        s_baji_lcd_te_ready.store(false);
+        ESP_LOGW(TAG, "LCD TE sync disabled: no TE pulse on GPIO%d", QSPI_PIN_NUM_LCD_TE);
+    }
+    return false;
+}
+
+static void Baji185EnableLcdTeOutput(esp_lcd_panel_io_handle_t panel_io)
+{
+    uint8_t te_mode = 0x00;
+    int lcd_cmd = 0x35;
+    lcd_cmd &= 0xff;
+    lcd_cmd <<= 8;
+    lcd_cmd |= LCD_OPCODE_WRITE_CMD << 24;
+
+    esp_err_t ret = esp_lcd_panel_io_tx_param(panel_io, lcd_cmd, &te_mode, sizeof(te_mode));
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "LCD TE output enable failed: %s", esp_err_to_name(ret));
+    }
+}
+
+static void Baji185LcdTeDisplayEvent(lv_event_t* event)
+{
+    lv_event_code_t code = lv_event_get_code(event);
+    if (code == LV_EVENT_FLUSH_START) {
+        if (!s_baji_lcd_te_waited_this_round.exchange(true)) {
+            Baji185WaitLcdTePulse();
+        }
+    } else if (code == LV_EVENT_REFR_READY) {
+        s_baji_lcd_te_waited_this_round.store(false);
+    }
+}
+
+extern "C" void baji_lcd_te_attach_display(lv_display_t* display)
+{
+    if (display == nullptr || !s_baji_lcd_te_ready.load()) {
+        return;
+    }
+
+    lv_display_add_event_cb(display, Baji185LcdTeDisplayEvent, LV_EVENT_FLUSH_START, nullptr);
+    lv_display_add_event_cb(display, Baji185LcdTeDisplayEvent, LV_EVENT_REFR_READY, nullptr);
+}
 
 /**
  * @brief ST77916 LCD厂商特定初始化命令序列
@@ -380,9 +518,11 @@ SpiLcdDisplay* baji_185_create_lcd_display(bool quiet_boot)
 
     esp_lcd_panel_reset(panel);
     esp_lcd_panel_init(panel);
+    Baji185EnableLcdTeOutput(panel_io);
     esp_lcd_panel_disp_on_off(panel, true);
     esp_lcd_panel_swap_xy(panel, DISPLAY_SWAP_XY);
     esp_lcd_panel_mirror(panel, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
+    Baji185InitLcdTeSync();
 
     return new SpiLcdDisplay(panel_io, panel,
                              DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X,

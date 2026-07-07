@@ -198,6 +198,11 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
 #if defined(BAJI_185_CENTER_STATUS_UI)
     if (battery_img_ != nullptr && battery_percent_label_ != nullptr && network_img_ != nullptr) {
         if (board.GetBatteryLevel(battery_level, charging, discharging)) {
+            if (battery_level < 0) {
+                battery_level = 0;
+            } else if (battery_level > 100) {
+                battery_level = 100;
+            }
             const lv_image_dsc_t* bat_dsc = &baji185_bat_2;
             if (charging) {
                 bat_dsc = &baji185_bat_charge;
@@ -222,7 +227,7 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
             lv_label_set_text(battery_percent_label_, pct);
 
             if (low_battery_popup_ != nullptr && !update_all) {
-                if (battery_level < 20 && discharging) {
+                if (battery_level <= 20 && discharging) {
                     if (lv_obj_has_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN)) {
                         lv_obj_remove_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
                         app.Schedule([&app]() {
@@ -239,6 +244,11 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
     } else
 #endif
     if (board.GetBatteryLevel(battery_level, charging, discharging)) {
+        if (battery_level < 0) {
+            battery_level = 0;
+        } else if (battery_level > 100) {
+            battery_level = 100;
+        }
         if (charging) {
             icon = FONT_AWESOME_BATTERY_BOLT;
         } else {
