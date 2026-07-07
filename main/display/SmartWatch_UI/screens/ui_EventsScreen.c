@@ -15,6 +15,8 @@
 
 lv_obj_t * ui_EventsScreen;
 
+extern const lv_image_dsc_t * const event_day_digit_images[31];
+
 #define EV_GREEN         0x10b981
 #define EV_ACCENT        0x34d399
 #define EV_BG            0x0a0e13
@@ -113,6 +115,15 @@ static void ev_set_translate_x(void * obj, int32_t value)
         ev_state.drag_x = value;
         ev_apply_strip_visuals(value);
     }
+}
+
+static void ev_set_translate_y(void * obj, int32_t value)
+{
+    if(!obj) {
+        return;
+    }
+
+    lv_obj_set_style_translate_y((lv_obj_t *)obj, value, 0);
 }
 
 static void ev_set_opa(void * obj, int32_t value)
@@ -216,16 +227,13 @@ static void ev_play_change_animations(void)
         return;
     }
 
-    lv_obj_set_style_transform_scale_x(ev_view.day_big, (int32_t)(LV_SCALE_NONE * 130 / 100), 0);
-    lv_obj_set_style_transform_scale_y(ev_view.day_big, (int32_t)(LV_SCALE_NONE * 130 / 100), 0);
+    lv_obj_set_style_translate_y(ev_view.day_big, -8, 0);
     lv_obj_set_style_opa(ev_view.day_big, (lv_opa_t)(LV_OPA_COVER * 30 / 100), 0);
     lv_obj_set_style_opa(ev_view.month_year, (lv_opa_t)(LV_OPA_COVER * 30 / 100), 0);
     lv_obj_set_style_opa(ev_view.weekday_row, (lv_opa_t)(LV_OPA_COVER * 30 / 100), 0);
 
-    ev_start_int_anim(ev_view.day_big, (lv_anim_exec_xcb_t)ev_set_scale,
-                      (int32_t)(LV_SCALE_NONE * 130 / 100),
-                      (int32_t)(LV_SCALE_NONE * 180 / 100),
-                      350, lv_anim_path_overshoot, NULL);
+    ev_start_int_anim(ev_view.day_big, (lv_anim_exec_xcb_t)ev_set_translate_y,
+                      -8, 0, 250, lv_anim_path_ease_out, NULL);
     ev_start_int_anim(ev_view.day_big, (lv_anim_exec_xcb_t)ev_set_opa,
                       (int32_t)(LV_OPA_COVER * 30 / 100), LV_OPA_COVER,
                       200, NULL, NULL);
@@ -250,18 +258,19 @@ static void ev_update_header(const ev_day_info_t * selected)
         "星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"
     };
     char month_year[32];
-    char day_buf[8];
+    int32_t day = selected->tm.tm_mday;
+    lv_color_t day_color = selected->is_today ? lv_color_hex(EV_GREEN) : lv_color_white();
 
     lv_snprintf(month_year, sizeof(month_year), "%d年%d月",
                 selected->tm.tm_year + 1900, selected->tm.tm_mon + 1);
-    lv_snprintf(day_buf, sizeof(day_buf), "%d", selected->tm.tm_mday);
-
     lv_label_set_text(ev_view.month_year, month_year);
-    lv_label_set_text(ev_view.day_big, day_buf);
+    if(day >= 1 && day <= 31) {
+        lv_image_set_src(ev_view.day_big, event_day_digit_images[day - 1]);
+    }
     lv_label_set_text(ev_view.weekday, weekdays[selected->tm.tm_wday]);
 
-    lv_obj_set_style_text_color(ev_view.day_big,
-                                selected->is_today ? lv_color_hex(EV_GREEN) : lv_color_white(), 0);
+    lv_obj_set_style_image_recolor(ev_view.day_big, day_color, 0);
+    lv_obj_set_style_image_recolor_opa(ev_view.day_big, LV_OPA_COVER, 0);
     lv_obj_set_style_text_color(ev_view.weekday,
                                 selected->is_today ? lv_color_hex(EV_GREEN) : lv_color_hex(0x808080), 0);
 
@@ -683,15 +692,14 @@ static void ev_build_header(lv_obj_t * parent)
     lv_obj_set_style_text_opa(ev_view.month_year, (lv_opa_t)(LV_OPA_COVER * 32 / 100), 0);
     lv_obj_set_style_text_letter_space(ev_view.month_year, 2, 0);
 
-    ev_view.day_big = ev_create_label(ev_view.content, "");
-    lv_obj_set_style_text_color(ev_view.day_big, lv_color_white(), 0);
-    lv_obj_set_style_text_font(ev_view.day_big, &lv_font_montserrat_48, 0);
+    ev_view.day_big = lv_image_create(ev_view.content);
+    ev_reset_style(ev_view.day_big);
+    lv_image_set_src(ev_view.day_big, event_day_digit_images[0]);
+    lv_image_set_antialias(ev_view.day_big, true);
+    lv_obj_set_style_image_recolor(ev_view.day_big, lv_color_white(), 0);
+    lv_obj_set_style_image_recolor_opa(ev_view.day_big, LV_OPA_COVER, 0);
     lv_obj_set_style_margin_top(ev_view.day_big, 10, 0);
-    lv_obj_set_style_transform_pivot_x(ev_view.day_big, LV_PCT(50), 0);
-    lv_obj_set_style_transform_pivot_y(ev_view.day_big, LV_PCT(50), 0);
-    lv_obj_set_style_transform_scale_x(ev_view.day_big, (int32_t)(LV_SCALE_NONE * 180 / 100), 0);
-    lv_obj_set_style_transform_scale_y(ev_view.day_big, (int32_t)(LV_SCALE_NONE * 180 / 100), 0);
-    lv_obj_set_style_text_letter_space(ev_view.day_big, -2, 0);
+    ev_disable_interaction(ev_view.day_big);
 
     ev_view.weekday_row = lv_obj_create(ev_view.content);
     ev_reset_style(ev_view.weekday_row);

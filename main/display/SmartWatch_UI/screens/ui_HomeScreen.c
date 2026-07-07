@@ -30,6 +30,7 @@ typedef struct {
     lv_obj_t * time_minute;
     lv_obj_t * date_label;
     lv_obj_t * hero_button;
+    lv_obj_t * app_grid;
     lv_timer_t * clock_timer;
 } home_view_t;
 
@@ -51,6 +52,8 @@ typedef struct {
 static home_view_t g_home_view;
 static lv_grad_dsc_t g_home_hero_grad;
 #define HOME_APP_COUNT ((uint8_t)(sizeof(kHomeApps) / sizeof(kHomeApps[0])))
+#define HOME_HERO_PRESSED_INSET (-5)
+#define HOME_APP_PRESSED_INSET (-4)
 static lv_grad_dsc_t g_home_app_icon_grads[4];
 
 static const char * const kHomeWeekDays[] = {
@@ -78,11 +81,113 @@ static void home_set_shadow_opa(void * obj, int32_t value)
     lv_obj_set_style_shadow_opa((lv_obj_t *)obj, (lv_opa_t)value, 0);
 }
 
-/* 为缩放动画提供统一入口。 */
-static void home_set_transform_scale(void * obj, int32_t value)
+/* 为背景透明度动画提供统一入口。 */
+static void home_set_bg_opa(void * obj, int32_t value)
 {
     if(!obj) return;
-    lv_obj_set_style_transform_scale((lv_obj_t *)obj, value, 0);
+    lv_obj_set_style_bg_opa((lv_obj_t *)obj, (lv_opa_t)value, 0);
+}
+
+/* Use transform size instead of transform scale so child text/icons are not resampled. */
+static int32_t home_press_inset_height(int32_t inset)
+{
+    return inset < 0 ? inset / 2 : 0;
+}
+
+static void home_set_press_inset(void * obj, int32_t value)
+{
+    if(!obj) return;
+
+    lv_obj_set_style_transform_width((lv_obj_t *)obj, value, 0);
+    lv_obj_set_style_transform_height((lv_obj_t *)obj, home_press_inset_height(value), 0);
+}
+
+static int32_t home_get_press_inset(lv_obj_t * obj)
+{
+    if(!obj) return 0;
+    return lv_obj_get_style_transform_width(obj, LV_PART_MAIN);
+}
+
+static void home_reset_press_inset(lv_obj_t * obj)
+{
+    if(!obj) return;
+
+    lv_anim_del(obj, (lv_anim_exec_xcb_t)home_set_press_inset);
+    home_set_press_inset(obj, 0);
+}
+
+static lv_opa_t home_hero_bg_opa_idle(void)
+{
+    return (lv_opa_t)(LV_OPA_COVER * 94 / 100);
+}
+
+static lv_opa_t home_hero_bg_opa_pressed(void)
+{
+    return (lv_opa_t)(LV_OPA_COVER * 86 / 100);
+}
+
+static lv_opa_t home_get_bg_opa(lv_obj_t * obj)
+{
+    if(!obj) return home_hero_bg_opa_idle();
+    return lv_obj_get_style_bg_opa(obj, LV_PART_MAIN);
+}
+
+static lv_opa_t home_app_card_shadow_opa_idle(void)
+{
+    return (lv_opa_t)(LV_OPA_COVER * 32 / 100);
+}
+
+static lv_opa_t home_app_card_shadow_opa_pressed(void)
+{
+    return (lv_opa_t)(LV_OPA_COVER * 18 / 100);
+}
+
+static lv_opa_t home_get_shadow_opa(lv_obj_t * obj)
+{
+    if(!obj) return home_app_card_shadow_opa_idle();
+    return lv_obj_get_style_shadow_opa(obj, LV_PART_MAIN);
+}
+
+static void home_reset_app_card_visual(lv_obj_t * card)
+{
+    if(!card) return;
+
+    home_reset_press_inset(card);
+    lv_anim_del(card, (lv_anim_exec_xcb_t)home_set_shadow_opa);
+    lv_obj_set_style_shadow_opa(card, home_app_card_shadow_opa_idle(), 0);
+}
+
+static void home_reset_hero_button_visual(lv_obj_t * button)
+{
+    if(!button) return;
+
+    home_reset_press_inset(button);
+    lv_anim_del(button, (lv_anim_exec_xcb_t)home_set_bg_opa);
+    lv_obj_set_style_bg_opa(button, home_hero_bg_opa_idle(), 0);
+}
+
+static lv_obj_t * home_app_item_get_card(lv_obj_t * item)
+{
+    if(!item || lv_obj_get_child_count(item) == 0) return NULL;
+    return lv_obj_get_child(item, 0);
+}
+
+static bool home_is_press_end_event(lv_event_code_t code)
+{
+    return code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST || code == LV_EVENT_CANCEL;
+}
+
+static void home_reset_press_visuals(void)
+{
+    home_reset_hero_button_visual(g_home_view.hero_button);
+
+    if(!g_home_view.app_grid) return;
+
+    uint32_t child_count = lv_obj_get_child_count(g_home_view.app_grid);
+    for(uint32_t i = 0; i < child_count; ++i) {
+        lv_obj_t * item = lv_obj_get_child(g_home_view.app_grid, i);
+        home_reset_app_card_visual(home_app_item_get_card(item));
+    }
 }
 
 /* 启动一个简单的单值动画，减少重复样板代码。 */
@@ -234,14 +339,6 @@ static void home_clock_timer_cb(lv_timer_t * timer)
     home_update_clock();
 }
 
-/* 设置缩放中心，避免按压动画看起来偏移。 */
-static void home_prepare_scale_pivot(lv_obj_t * obj)
-{
-    if(!obj) return;
-    lv_obj_set_style_transform_pivot_x(obj, lv_obj_get_width(obj) / 2, 0);
-    lv_obj_set_style_transform_pivot_y(obj, lv_obj_get_height(obj) / 2, 0);
-}
-
 /* 统一判断当前点击是否应被控制中心或拖拽释放拦截。 */
 static bool home_is_valid_release(lv_event_t * e)
 {
@@ -259,21 +356,43 @@ static void home_open_screen(lv_obj_t ** target_screen)
 static void home_hero_event_cb(lv_event_t * e)
 {
     lv_event_code_t code = lv_event_get_code(e);
-    lv_obj_t * button = lv_event_get_target(e);
+    lv_obj_t * button = lv_event_get_current_target(e);
 
-    if(!button || ui_ControlCenter_is_visible()) return;
+    if(!button) return;
 
-    if(code == LV_EVENT_PRESSED) {
-        home_prepare_scale_pivot(button);
-        home_start_anim(button, (lv_anim_exec_xcb_t)home_set_transform_scale, LV_SCALE_NONE, 242, 90);
+    if(home_is_press_end_event(code)) {
+        bool should_open = code == LV_EVENT_RELEASED && home_is_valid_release(e) && !ui_ControlCenter_is_visible();
+        if(should_open) {
+            home_reset_hero_button_visual(button);
+            home_open_screen(&ui_AIChatScreen);
+        } else {
+            home_start_anim(button,
+                            (lv_anim_exec_xcb_t)home_set_press_inset,
+                            home_get_press_inset(button),
+                            0,
+                            110);
+            home_start_anim(button,
+                            (lv_anim_exec_xcb_t)home_set_bg_opa,
+                            (int32_t)home_get_bg_opa(button),
+                            (int32_t)home_hero_bg_opa_idle(),
+                            110);
+        }
         return;
     }
 
-    if(code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-        home_start_anim(button, (lv_anim_exec_xcb_t)home_set_transform_scale, 242, LV_SCALE_NONE, 110);
-        if(code == LV_EVENT_RELEASED && home_is_valid_release(e)) {
-            home_open_screen(&ui_AIChatScreen);
-        }
+    if(ui_ControlCenter_is_visible()) return;
+
+    if(code == LV_EVENT_PRESSED) {
+        home_start_anim(button,
+                        (lv_anim_exec_xcb_t)home_set_press_inset,
+                        home_get_press_inset(button),
+                        HOME_HERO_PRESSED_INSET,
+                        90);
+        home_start_anim(button,
+                        (lv_anim_exec_xcb_t)home_set_bg_opa,
+                        (int32_t)home_get_bg_opa(button),
+                        (int32_t)home_hero_bg_opa_pressed(),
+                        90);
     }
 }
 
@@ -281,38 +400,63 @@ static void home_hero_event_cb(lv_event_t * e)
 static void home_app_event_cb(lv_event_t * e)
 {
     lv_event_code_t code = lv_event_get_code(e);
-    lv_obj_t * item = lv_event_get_target(e);
-    lv_obj_t * card = item ? lv_obj_get_child(item, 0) : NULL;
+    lv_obj_t * item = lv_event_get_current_target(e);
+    lv_obj_t * card = home_app_item_get_card(item);
 
-    if(!item || ui_ControlCenter_is_visible()) return;
+    if(!item) return;
 
-    if(code == LV_EVENT_PRESSED) {
+    if(home_is_press_end_event(code)) {
+        bool should_open = code == LV_EVENT_RELEASED && home_is_valid_release(e) && !ui_ControlCenter_is_visible();
+
         if(card) {
-            home_prepare_scale_pivot(card);
-            home_start_anim(card, (lv_anim_exec_xcb_t)home_set_transform_scale, LV_SCALE_NONE, 238, 90);
-            home_start_anim(card, (lv_anim_exec_xcb_t)home_set_shadow_opa,
-                            (int32_t)(LV_OPA_COVER * 32 / 100),
-                            (int32_t)(LV_OPA_COVER * 18 / 100),
-                            90);
-        }
-        return;
-    }
-
-    if(code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-        if(card) {
-            home_start_anim(card, (lv_anim_exec_xcb_t)home_set_transform_scale, 238, LV_SCALE_NONE, 120);
-            home_start_anim(card, (lv_anim_exec_xcb_t)home_set_shadow_opa,
-                            (int32_t)(LV_OPA_COVER * 18 / 100),
-                            (int32_t)(LV_OPA_COVER * 32 / 100),
-                            120);
+            if(should_open) {
+                home_reset_app_card_visual(card);
+            } else {
+                home_start_anim(card,
+                                (lv_anim_exec_xcb_t)home_set_press_inset,
+                                home_get_press_inset(card),
+                                0,
+                                120);
+                home_start_anim(card,
+                                (lv_anim_exec_xcb_t)home_set_shadow_opa,
+                                (int32_t)home_get_shadow_opa(card),
+                                (int32_t)home_app_card_shadow_opa_idle(),
+                                120);
+            }
         }
 
-        if(code == LV_EVENT_RELEASED && home_is_valid_release(e)) {
+        if(should_open) {
             uint8_t index = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
             if(index < HOME_APP_COUNT) {
                 home_open_screen(kHomeApps[index].target_screen);
             }
         }
+        return;
+    }
+
+    if(ui_ControlCenter_is_visible()) return;
+
+    if(code == LV_EVENT_PRESSED) {
+        if(card) {
+            home_start_anim(card,
+                            (lv_anim_exec_xcb_t)home_set_press_inset,
+                            home_get_press_inset(card),
+                            HOME_APP_PRESSED_INSET,
+                            90);
+            home_start_anim(card, (lv_anim_exec_xcb_t)home_set_shadow_opa,
+                            (int32_t)home_get_shadow_opa(card),
+                            (int32_t)home_app_card_shadow_opa_pressed(),
+                            90);
+        }
+    }
+}
+
+/* 页面进入或离开时清理没有完成的按压反馈。 */
+static void home_screen_event_cb(lv_event_t * e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    if(code == LV_EVENT_SCREEN_LOAD_START || code == LV_EVENT_SCREEN_UNLOAD_START) {
+        home_reset_press_visuals();
     }
 }
 
@@ -372,7 +516,7 @@ static lv_obj_t * home_build_hero_button(lv_obj_t * parent, lv_obj_t * anchor)
     lv_obj_set_size(button, 198, 66);
     lv_obj_set_style_radius(button, 22, 0);
     lv_obj_set_style_bg_color(button, lv_color_hex(0xbe185d), 0);
-    lv_obj_set_style_bg_opa(button, (lv_opa_t)(LV_OPA_COVER * 94 / 100), 0);
+    lv_obj_set_style_bg_opa(button, home_hero_bg_opa_idle(), 0);
     lv_obj_set_style_bg_grad(button, &g_home_hero_grad, 0);
     lv_obj_set_style_border_width(button, 1, 0);
     lv_obj_set_style_border_color(button, lv_color_white(), 0);
@@ -385,6 +529,7 @@ static lv_obj_t * home_build_hero_button(lv_obj_t * parent, lv_obj_t * anchor)
     lv_obj_add_event_cb(button, home_hero_event_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(button, home_hero_event_cb, LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(button, home_hero_event_cb, LV_EVENT_PRESS_LOST, NULL);
+    lv_obj_add_event_cb(button, home_hero_event_cb, LV_EVENT_CANCEL, NULL);
 
     lv_obj_t * icon_box = home_create_base_container(button, 40, 40);
     lv_obj_set_style_radius(icon_box, 12, 0);
@@ -432,6 +577,7 @@ static lv_obj_t * home_build_app_item(lv_obj_t * parent, const home_app_config_t
     lv_obj_add_event_cb(item, home_app_event_cb, LV_EVENT_PRESSED, (void *)(uintptr_t)index);
     lv_obj_add_event_cb(item, home_app_event_cb, LV_EVENT_RELEASED, (void *)(uintptr_t)index);
     lv_obj_add_event_cb(item, home_app_event_cb, LV_EVENT_PRESS_LOST, (void *)(uintptr_t)index);
+    lv_obj_add_event_cb(item, home_app_event_cb, LV_EVENT_CANCEL, (void *)(uintptr_t)index);
 
     lv_obj_t * card = home_create_base_container(item, config->w, config->h);
     lv_obj_set_style_radius(card, 15, 0);
@@ -482,6 +628,7 @@ static lv_obj_t * home_build_app_grid(lv_obj_t * parent, lv_obj_t * anchor)
 {
     lv_obj_t * grid = home_create_base_container(parent, 198, 132);
     lv_obj_align_to(grid, anchor, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
+    g_home_view.app_grid = grid;
 
     for(uint8_t i = 0; i < HOME_APP_COUNT; ++i) {
         (void)home_build_app_item(grid, &kHomeApps[i], i);
@@ -500,6 +647,8 @@ static void home_build_screen_root(void)
     lv_obj_set_style_bg_opa(ui_HomeScreen, LV_OPA_COVER, 0);
     lv_obj_add_flag(ui_HomeScreen, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(ui_HomeScreen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(ui_HomeScreen, home_screen_event_cb, LV_EVENT_SCREEN_LOAD_START, NULL);
+    lv_obj_add_event_cb(ui_HomeScreen, home_screen_event_cb, LV_EVENT_SCREEN_UNLOAD_START, NULL);
 }
 
 /* 清理运行时缓存指针，便于页面销毁后安全重建。 */
@@ -510,6 +659,7 @@ static void home_reset_runtime_state(void)
     g_home_view.time_minute = NULL;
     g_home_view.date_label = NULL;
     g_home_view.hero_button = NULL;
+    g_home_view.app_grid = NULL;
     g_home_view.clock_timer = NULL;
 }
 
@@ -560,6 +710,7 @@ bool ui_HomeScreen_dismiss_overlays(void)
 
 void ui_HomeScreen_reset_transient_state(void)
 {
-    /* 当前首页的瞬时状态只有控制中心弹层。 */
+    home_reset_press_visuals();
+    /* 恢复缓存页上的按压反馈和覆盖层状态。 */
     (void)ui_HomeScreen_dismiss_overlays();
 }
