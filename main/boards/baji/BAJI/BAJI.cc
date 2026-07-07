@@ -877,7 +877,11 @@ private:
      * @return bool true=调制解调器存活，false=未检测到
      */
     bool Is4GModemAliveQuickCheck() {
-        auto probe = AtModem::Detect(UART_4G_TXD, UART_4G_RXD, UART0_DTR, 115200, 1200);
+        auto probe = AtModem::Detect(UART_4G_TXD, UART_4G_RXD, UART0_DTR, 921600, 1200);
+        if (probe != nullptr) {
+            return true;
+        }
+        probe = AtModem::Detect(UART_4G_TXD, UART_4G_RXD, UART0_DTR, 115200, 1200);
         return probe != nullptr;
     }
 

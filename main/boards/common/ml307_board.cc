@@ -90,7 +90,7 @@ void Ml307Board::OnNetworkEvent(NetworkEvent event, const std::string& data) {
 void Ml307Board::NetworkTask() {
     OnNetworkEvent(NetworkEvent::ModemDetecting);
 
-    static const int detect_baud_rates[] = {115200, 921600};
+    static const int detect_baud_rates[] = {921600, 115200};
     int detect_retries = 0;
     while (detect_retries < MODEM_DETECT_MAX_RETRIES) {
         if (stop_requested_) {
