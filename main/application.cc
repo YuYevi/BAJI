@@ -895,6 +895,7 @@ void Application::Run() {
                 } else if (++listening_silence_ticks_ >= kListeningSilenceTimeoutSeconds) {
                     if (protocol_) {
                         protocol_->SendStopListening();
+                        protocol_->CloseAudioChannel();
                     }
                     SetDeviceState(kDeviceStateIdle);
                 }
@@ -1554,7 +1555,13 @@ void Application::HandleWakeWordDetectedEvent() {
 }
 
 void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
-    if (GetDeviceState() != kDeviceStateConnecting) {
+    if (!protocol_) {
+        return;
+    }
+
+    auto state = GetDeviceState();
+    if (state != kDeviceStateConnecting &&
+        !(state == kDeviceStateIdle && protocol_->IsAudioChannelOpened())) {
         return;
     }
 
