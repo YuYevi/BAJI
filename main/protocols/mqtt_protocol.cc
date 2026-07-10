@@ -5,7 +5,9 @@
 
 #include <esp_log.h>
 #include <cstring>
+#include <limits>
 #include <arpa/inet.h>
+#include <utility>
 #include "assets/lang_config.h"
 
 #define TAG "MQTT"
@@ -53,6 +55,58 @@ MqttProtocol::~MqttProtocol() {
     }
 }
 
+namespace {
+
+bool ParseEndpoint(const std::string& endpoint, std::string* address, int* port) {
+    size_t pos = endpoint.find(':');
+    if (pos == std::string::npos) {
+        *address = endpoint;
+        return !address->empty();
+    }
+
+    *address = endpoint.substr(0, pos);
+    std::string port_text = endpoint.substr(pos + 1);
+    if (address->empty() || port_text.empty()) {
+        return false;
+    }
+
+    int parsed_port = 0;
+    for (char ch : port_text) {
+        if (ch < '0' || ch > '9') {
+            return false;
+        }
+        const int digit = ch - '0';
+        if (parsed_port > (65535 - digit) / 10) {
+            return false;
+        }
+        parsed_port = parsed_port * 10 + digit;
+    }
+    if (parsed_port <= 0) {
+        return false;
+    }
+
+    *port = parsed_port;
+    return true;
+}
+
+bool HexValue(char c, uint8_t* value) {
+    if (c >= '0' && c <= '9') {
+        *value = c - '0';
+        return true;
+    }
+    if (c >= 'A' && c <= 'F') {
+        *value = c - 'A' + 10;
+        return true;
+    }
+    if (c >= 'a' && c <= 'f') {
+        *value = c - 'a' + 10;
+        return true;
+    }
+    return false;
+}
+
+}  // namespace
+
 bool MqttProtocol::Start() {
     return StartMqttClient(false);
 }
@@ -80,7 +134,20 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     }
 
     auto network = Board::GetInstance().GetNetwork();
+    if (network == nullptr) {
+        if (report_error) {
+            SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+        }
+        return false;
+    }
+
     mqtt_ = network->CreateMqtt(0);
+    if (mqtt_ == nullptr) {
+        if (report_error) {
+            SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+        }
+        return false;
+    }
     mqtt_->SetKeepAlive(keepalive_interval);
 
     mqtt_->OnDisconnected([this]() {
@@ -136,12 +203,11 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     
     std::string broker_address;
     int broker_port = 8883;
-    size_t pos = endpoint.find(':');
-    if (pos != std::string::npos) {
-        broker_address = endpoint.substr(0, pos);
-        broker_port = std::stoi(endpoint.substr(pos + 1));
-    } else {
-        broker_address = endpoint;
+    if (!ParseEndpoint(endpoint, &broker_address, &broker_port)) {
+        if (report_error) {
+            SetError(Lang::Strings::SERVER_NOT_FOUND);
+        }
+        return false;
     }
     if (!mqtt_->Connect(broker_address, broker_port, client_id, username, password)) {
         
@@ -168,14 +234,18 @@ bool MqttProtocol::SendText(const std::string& text) {
 
 bool MqttProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     std::lock_guard<std::mutex> lock(channel_mutex_);
-    if (udp_ == nullptr) {
+    if (udp_ == nullptr || packet == nullptr || aes_nonce_.size() < 16 ||
+        packet->payload.size() > std::numeric_limits<uint16_t>::max()) {
         return false;
     }
 
     std::string nonce(aes_nonce_);
-    *(uint16_t*)&nonce[2] = htons(packet->payload.size());
-    *(uint32_t*)&nonce[8] = htonl(packet->timestamp);
-    *(uint32_t*)&nonce[12] = htonl(++local_sequence_);
+    uint16_t payload_size = htons(static_cast<uint16_t>(packet->payload.size()));
+    uint32_t timestamp = htonl(packet->timestamp);
+    uint32_t sequence = htonl(++local_sequence_);
+    memcpy(&nonce[2], &payload_size, sizeof(payload_size));
+    memcpy(&nonce[8], &timestamp, sizeof(timestamp));
+    memcpy(&nonce[12], &sequence, sizeof(sequence));
 
     std::string encrypted;
     encrypted.resize(aes_nonce_.size() + packet->payload.size());
@@ -242,10 +312,19 @@ bool MqttProtocol::OpenAudioChannel() {
 
     std::lock_guard<std::mutex> lock(channel_mutex_);
     auto network = Board::GetInstance().GetNetwork();
+    if (network == nullptr) {
+        SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+        return false;
+    }
+
     udp_ = network->CreateUdp(2);
+    if (udp_ == nullptr) {
+        SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+        return false;
+    }
     udp_->OnMessage([this](const std::string& data) {
         
-        if (data.size() < sizeof(aes_nonce_)) {
+        if (aes_nonce_.size() < 16 || data.size() < aes_nonce_.size()) {
             
             return;
         }
@@ -253,8 +332,12 @@ bool MqttProtocol::OpenAudioChannel() {
             
             return;
         }
-        uint32_t timestamp = ntohl(*(uint32_t*)&data[8]);
-        uint32_t sequence = ntohl(*(uint32_t*)&data[12]);
+        uint32_t timestamp_net = 0;
+        uint32_t sequence_net = 0;
+        memcpy(&timestamp_net, data.data() + 8, sizeof(timestamp_net));
+        memcpy(&sequence_net, data.data() + 12, sizeof(sequence_net));
+        uint32_t timestamp = ntohl(timestamp_net);
+        uint32_t sequence = ntohl(sequence_net);
         if (sequence < remote_sequence_) {
             
             return;
@@ -320,7 +403,8 @@ std::string MqttProtocol::GetHelloMessage() {
 
 void MqttProtocol::ParseServerHello(const cJSON* root) {
     auto transport = cJSON_GetObjectItem(root, "transport");
-    if (transport == nullptr || strcmp(transport->valuestring, "udp") != 0) {
+    if (!cJSON_IsString(transport) || transport->valuestring == nullptr ||
+        strcmp(transport->valuestring, "udp") != 0) {
         
         return;
     }
@@ -349,36 +433,52 @@ void MqttProtocol::ParseServerHello(const cJSON* root) {
         
         return;
     }
-    udp_server_ = cJSON_GetObjectItem(udp, "server")->valuestring;
-    udp_port_ = cJSON_GetObjectItem(udp, "port")->valueint;
-    auto key = cJSON_GetObjectItem(udp, "key")->valuestring;
-    auto nonce = cJSON_GetObjectItem(udp, "nonce")->valuestring;
+    auto server = cJSON_GetObjectItem(udp, "server");
+    auto port = cJSON_GetObjectItem(udp, "port");
+    auto key = cJSON_GetObjectItem(udp, "key");
+    auto nonce = cJSON_GetObjectItem(udp, "nonce");
+    if (!cJSON_IsString(server) || server->valuestring == nullptr ||
+        !cJSON_IsNumber(port) || port->valueint <= 0 ||
+        !cJSON_IsString(key) || key->valuestring == nullptr ||
+        !cJSON_IsString(nonce) || nonce->valuestring == nullptr) {
+        return;
+    }
+
+    std::string decoded_key = DecodeHexString(key->valuestring);
+    std::string decoded_nonce = DecodeHexString(nonce->valuestring);
+    if (decoded_key.size() != 16 || decoded_nonce.size() < 16) {
+        return;
+    }
+
+    udp_server_ = server->valuestring;
+    udp_port_ = port->valueint;
 
     
     
-    aes_nonce_ = DecodeHexString(nonce);
+    aes_nonce_ = std::move(decoded_nonce);
     mbedtls_aes_init(&aes_ctx_);
-    mbedtls_aes_setkey_enc(&aes_ctx_, (const unsigned char*)DecodeHexString(key).c_str(), 128);
+    if (mbedtls_aes_setkey_enc(&aes_ctx_, reinterpret_cast<const unsigned char*>(decoded_key.data()), 128) != 0) {
+        return;
+    }
     local_sequence_ = 0;
     remote_sequence_ = 0;
     xEventGroupSetBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT);
 }
 
-static const char hex_chars[] = "0123456789ABCDEF";
-
-static inline uint8_t CharToHex(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    return 0;  
-}
-
 std::string MqttProtocol::DecodeHexString(const std::string& hex_string) {
     std::string decoded;
+    if ((hex_string.size() % 2) != 0) {
+        return {};
+    }
+
     decoded.reserve(hex_string.size() / 2);
     for (size_t i = 0; i < hex_string.size(); i += 2) {
-        char byte = (CharToHex(hex_string[i]) << 4) | CharToHex(hex_string[i + 1]);
-        decoded.push_back(byte);
+        uint8_t high = 0;
+        uint8_t low = 0;
+        if (!HexValue(hex_string[i], &high) || !HexValue(hex_string[i + 1], &low)) {
+            return {};
+        }
+        decoded.push_back(static_cast<char>((high << 4) | low));
     }
     return decoded;
 }

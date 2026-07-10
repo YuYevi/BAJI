@@ -29,6 +29,26 @@ void Ml307AtModem::ResetConnections() {
 }
 
 void Ml307AtModem::HandleUrc(const std::string& command, const std::vector<AtArgumentValue>& arguments) {
+    if (command == "CEREG") {
+        // ML307 is usable only after PDP gets an IP; CEREG means registration only.
+        bool was_ip_ready = network_ready_;
+        auto network_state_callback = on_network_state_changed_;
+        on_network_state_changed_ = nullptr;
+        AtModem::HandleUrc(command, arguments);
+        on_network_state_changed_ = network_state_callback;
+
+        bool registered = cereg_state_.stat == 1 || cereg_state_.stat == 5;
+        if (!registered) {
+            network_ready_ = false;
+            if (was_ip_ready && on_network_state_changed_) {
+                on_network_state_changed_(false);
+            }
+        } else if (!was_ip_ready) {
+            network_ready_ = false;
+        }
+        return;
+    }
+
     // Handle Common URC
     AtModem::HandleUrc(command, arguments);
     // Handle ML307 URC
@@ -36,8 +56,17 @@ void Ml307AtModem::HandleUrc(const std::string& command, const std::vector<AtArg
         if (arguments[1].int_value == 1) {
             auto ip = arguments[2].string_value;
             ESP_LOGI(TAG, "PDP Context %d IP: %s", arguments[0].int_value, ip.c_str());
+            bool was_ip_ready = network_ready_;
             network_ready_ = true;
             xEventGroupSetBits(event_group_handle_, AT_EVENT_NETWORK_READY);
+            if (!was_ip_ready && on_network_state_changed_) {
+                on_network_state_changed_(true);
+            }
+        } else if (network_ready_) {
+            network_ready_ = false;
+            if (on_network_state_changed_) {
+                on_network_state_changed_(false);
+            }
         }
     } else if (command == "MATREADY") {
         if (network_ready_) {
@@ -71,6 +100,9 @@ bool Ml307AtModem::IsBusyForSignalQuery() const {
 NetworkStatus Ml307AtModem::WaitForNetworkReady(int timeout_ms) {
     NetworkStatus status = AtModem::WaitForNetworkReady(timeout_ms);
     if (status == NetworkStatus::Ready) {
+        network_ready_ = false;
+        xEventGroupClearBits(event_group_handle_, AT_EVENT_NETWORK_READY);
+
         // Wait for IP address, maximum total wait time is 4270ms
         int delay_ms = 10;
         for (int i = 0; i < 10; i++) {
@@ -82,6 +114,7 @@ NetworkStatus Ml307AtModem::WaitForNetworkReady(int timeout_ms) {
             delay_ms = std::min(delay_ms * 2, 1000);
         }
         ESP_LOGE(TAG, "Network ready but no IP address");
+        return NetworkStatus::ErrorTimeout;
     }
     return status;
 }

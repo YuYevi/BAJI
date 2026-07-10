@@ -934,7 +934,7 @@ void Application::HandleNetworkConnectedEvent() {
             return;
         }
 
-        xTaskCreate(
+        BaseType_t ok = xTaskCreate(
             [](void* arg) {
                 Application* app = static_cast<Application*>(arg);
                 app->ActivationTask();
@@ -942,6 +942,13 @@ void Application::HandleNetworkConnectedEvent() {
                 vTaskDelete(NULL);
             },
             "activation", 4096 * 2, this, 2, &activation_task_handle_);
+        if (ok != pdPASS) {
+            activation_task_handle_ = nullptr;
+            ESP_LOGE(TAG, "Failed to create activation task");
+            Alert(Lang::Strings::ERROR, Lang::Strings::SERVER_ERROR, "triangle_exclamation",
+                  Lang::Sounds::OGG_EXCLAMATION);
+            SetDeviceState(kDeviceStateIdle);
+        }
     } else if (state == kDeviceStateIdle && protocol_ == nullptr) {
         RestartProtocolFromSettings();
     }
@@ -1104,8 +1111,13 @@ void Application::SetupProtocolCallbacks(Display* display, AudioCodec* codec, Bo
             if (cJSON_IsString(status) && cJSON_IsString(message) && cJSON_IsString(emotion) &&
                 status->valuestring != nullptr && message->valuestring != nullptr &&
                 emotion->valuestring != nullptr) {
-                Alert(status->valuestring, message->valuestring, emotion->valuestring,
-                      Lang::Sounds::OGG_VIBRATION);
+                Schedule([this,
+                          status_str = std::string(status->valuestring),
+                          message_str = std::string(message->valuestring),
+                          emotion_str = std::string(emotion->valuestring)]() {
+                    Alert(status_str.c_str(), message_str.c_str(), emotion_str.c_str(),
+                          Lang::Sounds::OGG_VIBRATION);
+                });
             }
 #if CONFIG_RECEIVE_CUSTOM_MESSAGE
         } else if (strcmp(type->valuestring, "custom") == 0) {
@@ -1145,7 +1157,11 @@ void Application::HandleNetworkDisconnectedEvent() {
     if (state == kDeviceStateConnecting || state == kDeviceStateListening ||
         state == kDeviceStateSpeaking) {
         if (board.GetActiveNetworkMode() != BoardNetworkMode::CELLULAR) {
-            protocol_->CloseAudioChannel();
+            if (protocol_) {
+                protocol_->CloseAudioChannel();
+            } else {
+                SetDeviceState(kDeviceStateIdle);
+            }
         }
     }
 
@@ -1337,7 +1353,9 @@ void Application::CheckNewVersion() {
                                should_play_sound);
             if (should_play_sound) {
                 ++activation_sound_play_count;
-                audio_service_.WaitForPlaybackQueueEmpty();
+                if (!audio_service_.WaitForPlaybackQueueEmpty(5000)) {
+                    ESP_LOGW(TAG, "Timed out waiting for activation sound playback");
+                }
                 last_activation_sound_finished_tick = xTaskGetTickCount();
             }
         }

@@ -15,6 +15,7 @@
 
 #include <ctime>
 #include <string>
+#include <utility>
 
 #define TAG_CTRL "MqttControl"
 
@@ -582,6 +583,9 @@ bool MqttControl::ReportEvent(const char* type, const char* json) {
     }
 
     cJSON* root = cJSON_CreateObject();
+    if (root == nullptr) {
+        return false;
+    }
     cJSON_AddStringToObject(root, "type", type);
     cJSON_AddNumberToObject(root, "timestamp", static_cast<double>(time(nullptr)));
 
@@ -593,6 +597,10 @@ bool MqttControl::ReportEvent(const char* type, const char* json) {
     }
 
     char* event_json = cJSON_PrintUnformatted(root);
+    if (event_json == nullptr) {
+        cJSON_Delete(root);
+        return false;
+    }
     bool ok = Publish(BuildTopic("events"), event_json, 1, false);
     cJSON_free(event_json);
     cJSON_Delete(root);
@@ -723,7 +731,11 @@ void MqttControl::HandleEvent(esp_mqtt_event_handle_t event) {
                      command_buffer_.c_str());
             auto callback = on_command_;
             if (callback) {
-                callback(command_buffer_.c_str(), static_cast<int>(command_buffer_.size()));
+                std::string payload = command_buffer_;
+                Application::GetInstance().Schedule([callback = std::move(callback),
+                                                     payload = std::move(payload)]() {
+                    callback(payload.c_str(), static_cast<int>(payload.size()));
+                });
             }
             command_buffer_.clear();
             break;

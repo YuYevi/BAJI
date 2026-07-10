@@ -646,6 +646,19 @@ private:
         return GetNetFlowState() != NetFlowState::Idle;
     }
 
+    bool IsFlowMovingAwayFrom(NetMode target) const {
+        NetFlowState state = GetNetFlowState();
+        if (target == NetMode::WIFI) {
+            return state == NetFlowState::SwitchingTo4G ||
+                   state == NetFlowState::Connecting4G ||
+                   fourg_boot_task_ != nullptr;
+        }
+        return state == NetFlowState::SwitchingToWifi ||
+               state == NetFlowState::ConnectingWifi ||
+               state == NetFlowState::WifiProvisioning ||
+               wifi_reprovision_task_ != nullptr;
+    }
+
     static uint8_t ClampBrightnessPercent(int value) {
         if (value <= 0) {
             return 1;
@@ -1021,6 +1034,30 @@ private:
         return false;
     }
 
+    bool WaitFor4gBootTaskDone(int timeout_ms) {
+        const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+        while (fourg_boot_task_ != nullptr) {
+            if (timeout_ms >= 0 && xTaskGetTickCount() >= deadline) {
+                ESP_LOGW(TAG, "Timed out waiting for 4G boot task");
+                return false;
+            }
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        return true;
+    }
+
+    bool WaitForWifiReprovisionTaskDone(int timeout_ms) {
+        const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+        while (wifi_reprovision_task_ != nullptr) {
+            if (timeout_ms >= 0 && xTaskGetTickCount() >= deadline) {
+                ESP_LOGW(TAG, "Timed out waiting for WiFi reprovision task");
+                return false;
+            }
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        return true;
+    }
+
     /**
      * @brief 异步启动4G网络
      * 
@@ -1065,6 +1102,7 @@ private:
             vTaskDelete(nullptr);
         }, "baji185_4g_start", 8192, ctx, 5, &fourg_boot_task_) != pdPASS) {
             delete ctx;
+            fourg_boot_task_ = nullptr;
             SetNetFlowState(NetFlowState::Idle);
         }
     }
@@ -1099,12 +1137,24 @@ private:
             (void)self->WaitForIdleBeforeSwitch(1500);
 
             if (target == NetMode::ML307) {
+                if (!self->WaitForWifiReprovisionTaskDone(8000)) {
+                    self->SetNetFlowState(NetFlowState::Idle);
+                    self->net_switch_task_ = nullptr;
+                    vTaskDelete(nullptr);
+                    return;
+                }
                 self->SetWifiAutoReconnectEnabled(false);
                 self->StopWifiNow();
                 self->net_mode_ = NetMode::ML307;
                 self->SavePreferredNetwork(NetMode::ML307);
                 self->Start4gAsync(for_dialog_wake);
             } else {
+                if (!self->WaitFor4gBootTaskDone(15000)) {
+                    self->SetNetFlowState(NetFlowState::Idle);
+                    self->net_switch_task_ = nullptr;
+                    vTaskDelete(nullptr);
+                    return;
+                }
                 self->Stop4gNow();
                 self->net_mode_ = NetMode::WIFI;
                 self->SavePreferredNetwork(NetMode::WIFI);
@@ -1116,6 +1166,7 @@ private:
             vTaskDelete(nullptr);
         }, "baji185_net_switch", 6144, ctx, 5, &net_switch_task_) != pdPASS) {
             delete ctx;
+            net_switch_task_ = nullptr;
             SetNetFlowState(NetFlowState::Idle);
         }
     }
@@ -1129,14 +1180,14 @@ private:
      * @return bool true=已受理切换请求，false=当前不可切换
      */
     bool RequestNetworkSwitch(NetMode target, bool for_dialog_wake = false, bool show_notification = true) {
-        if (target == net_mode_) {
-            return false;
-        }
-
-        if (net_switch_task_ != nullptr || wifi_reprovision_task_ != nullptr) {
+        if (net_switch_task_ != nullptr) {
             if (show_notification) {
                 ShowNetFlowBusyNotification("网络忙，请稍后再试");
             }
+            return false;
+        }
+
+        if (target == net_mode_ && !IsFlowMovingAwayFrom(target)) {
             return false;
         }
 
@@ -1200,7 +1251,7 @@ private:
             return;
         }
 
-        if (net_switch_task_ != nullptr || wifi_reprovision_task_ != nullptr || IsNetFlowProtected()) {
+        if (net_switch_task_ != nullptr || wifi_reprovision_task_ != nullptr) {
             ShowNetFlowBusyNotification("当前暂不允许进入配网");
             return;
         }
@@ -1221,6 +1272,12 @@ private:
             (void)self->WaitForIdleBeforeSwitch(1500);
 
             if (self->net_mode_ == NetMode::ML307) {
+                if (!self->WaitFor4gBootTaskDone(15000)) {
+                    self->SetNetFlowState(NetFlowState::Idle);
+                    self->wifi_reprovision_task_ = nullptr;
+                    vTaskDelete(nullptr);
+                    return;
+                }
                 self->Stop4gNow();
             } else {
                 self->StopWifiNow();
@@ -1235,6 +1292,7 @@ private:
             vTaskDelete(nullptr);
         }, "baji185_wifi_reprov", 6144, ctx, 5, &wifi_reprovision_task_) != pdPASS) {
             delete ctx;
+            wifi_reprovision_task_ = nullptr;
             SetNetFlowState(NetFlowState::Idle);
         }
     }

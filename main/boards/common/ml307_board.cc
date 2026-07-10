@@ -222,12 +222,18 @@ void Ml307Board::StartNetwork() {
     stop_requested_ = false;
     running_ = true;
     
-    xTaskCreate([](void* arg) {
+    BaseType_t ok = xTaskCreate([](void* arg) {
         Ml307Board* board = static_cast<Ml307Board*>(arg);
         board->NetworkTask();
         board->running_ = false;
         vTaskDelete(NULL);
     }, "ml307_net", 8192, this, 5, NULL);
+    if (ok != pdPASS) {
+        running_ = false;
+        stop_requested_ = true;
+        ESP_LOGE("Ml307Board", "Failed to create ml307_net task");
+        OnNetworkEvent(NetworkEvent::ModemErrorInitFailed);
+    }
 }
 
 void Ml307Board::StopNetwork() {

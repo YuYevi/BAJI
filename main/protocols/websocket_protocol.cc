@@ -107,9 +107,14 @@ bool WebsocketProtocol::OpenAudioChannel() {
     xEventGroupClearBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
 
     auto network = Board::GetInstance().GetNetwork();
+    if (network == nullptr) {
+        SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+        return false;
+    }
+
     websocket_ = network->CreateWebSocket(1);
     if (websocket_ == nullptr) {
-        
+        SetError(Lang::Strings::SERVER_NOT_CONNECTED);
         return false;
     }
 
@@ -125,31 +130,50 @@ bool WebsocketProtocol::OpenAudioChannel() {
     websocket_->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
 
     websocket_->OnData([this](const char* data, size_t len, bool binary) {
+        if (data == nullptr || len == 0) {
+            return;
+        }
+
         if (binary) {
             if (on_incoming_audio_ != nullptr) {
                 if (version_ == 2) {
-                    BinaryProtocol2* bp2 = (BinaryProtocol2*)data;
-                    bp2->version = ntohs(bp2->version);
-                    bp2->type = ntohs(bp2->type);
-                    bp2->timestamp = ntohl(bp2->timestamp);
-                    bp2->payload_size = ntohl(bp2->payload_size);
-                    auto payload = (uint8_t*)bp2->payload;
+                    if (len < sizeof(BinaryProtocol2)) {
+                        ESP_LOGW(TAG, "Dropping short binary v2 frame: %u", static_cast<unsigned>(len));
+                        return;
+                    }
+                    const auto* bp2 = reinterpret_cast<const BinaryProtocol2*>(data);
+                    const uint32_t timestamp = ntohl(bp2->timestamp);
+                    const uint32_t payload_size = ntohl(bp2->payload_size);
+                    if (payload_size > len - sizeof(BinaryProtocol2)) {
+                        ESP_LOGW(TAG, "Dropping invalid binary v2 frame: payload=%u, len=%u",
+                                 static_cast<unsigned>(payload_size), static_cast<unsigned>(len));
+                        return;
+                    }
+                    auto payload = reinterpret_cast<const uint8_t*>(data + sizeof(BinaryProtocol2));
                     on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
                         .sample_rate = server_sample_rate_,
                         .frame_duration = server_frame_duration_,
-                        .timestamp = bp2->timestamp,
-                        .payload = std::vector<uint8_t>(payload, payload + bp2->payload_size)
+                        .timestamp = timestamp,
+                        .payload = std::vector<uint8_t>(payload, payload + payload_size)
                     }));
                 } else if (version_ == 3) {
-                    BinaryProtocol3* bp3 = (BinaryProtocol3*)data;
-                    bp3->type = bp3->type;
-                    bp3->payload_size = ntohs(bp3->payload_size);
-                    auto payload = (uint8_t*)bp3->payload;
+                    if (len < sizeof(BinaryProtocol3)) {
+                        ESP_LOGW(TAG, "Dropping short binary v3 frame: %u", static_cast<unsigned>(len));
+                        return;
+                    }
+                    const auto* bp3 = reinterpret_cast<const BinaryProtocol3*>(data);
+                    const uint16_t payload_size = ntohs(bp3->payload_size);
+                    if (payload_size > len - sizeof(BinaryProtocol3)) {
+                        ESP_LOGW(TAG, "Dropping invalid binary v3 frame: payload=%u, len=%u",
+                                 payload_size, static_cast<unsigned>(len));
+                        return;
+                    }
+                    auto payload = reinterpret_cast<const uint8_t*>(data + sizeof(BinaryProtocol3));
                     on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
                         .sample_rate = server_sample_rate_,
                         .frame_duration = server_frame_duration_,
                         .timestamp = 0,
-                        .payload = std::vector<uint8_t>(payload, payload + bp3->payload_size)
+                        .payload = std::vector<uint8_t>(payload, payload + payload_size)
                     }));
                 } else {
                     on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
@@ -162,9 +186,11 @@ bool WebsocketProtocol::OpenAudioChannel() {
             }
         } else {
             
-            std::string payload(data, data + len);
-            
-            auto root = cJSON_Parse(data);
+            auto root = cJSON_ParseWithLength(data, len);
+            if (root == nullptr) {
+                ESP_LOGW(TAG, "Dropping invalid websocket JSON frame");
+                return;
+            }
             auto type = cJSON_GetObjectItem(root, "type");
             if (cJSON_IsString(type)) {
                 if (strcmp(type->valuestring, "hello") == 0) {
@@ -247,7 +273,8 @@ std::string WebsocketProtocol::GetHelloMessage() {
 
 void WebsocketProtocol::ParseServerHello(const cJSON* root) {
     auto transport = cJSON_GetObjectItem(root, "transport");
-    if (transport == nullptr || strcmp(transport->valuestring, "websocket") != 0) {
+    if (!cJSON_IsString(transport) || transport->valuestring == nullptr ||
+        strcmp(transport->valuestring, "websocket") != 0) {
         
         return;
     }

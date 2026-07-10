@@ -31,12 +31,17 @@
 #endif
 
 #include <cstring>
+#include <limits>
 #include <vector>
 #include <sstream>
 #include <algorithm>
 #include <utility>
 
 #define TAG "Ota"
+
+namespace {
+constexpr int kOtaHttpTimeoutMs = 15000;
+}
 
 /**
  * @brief Ota 类构造函数
@@ -90,7 +95,18 @@ std::string Ota::GetCheckVersionUrl() {
 std::unique_ptr<Http> Ota::SetupHttp() {
     auto& board = Board::GetInstance();
     auto network = board.GetNetwork();
+    if (network == nullptr) {
+        ESP_LOGE(TAG, "Network is not ready for OTA request");
+        return nullptr;
+    }
+
     auto http = network->CreateHttp(0);
+    if (http == nullptr) {
+        ESP_LOGE(TAG, "Failed to create OTA HTTP client");
+        return nullptr;
+    }
+    http->SetTimeout(kOtaHttpTimeoutMs);
+
     auto user_agent = SystemInfo::GetUserAgent();
 
     http->SetHeader("Activation-Version", has_serial_number_ ? "2" : "1");
@@ -133,6 +149,9 @@ esp_err_t Ota::CheckVersion() {
     }
 
     auto http = SetupHttp();
+    if (http == nullptr) {
+        return ESP_ERR_INVALID_STATE;
+    }
 
     std::string data = board.GetSystemInfoJson();
     std::string method = data.length() > 0 ? "POST" : "GET";
@@ -398,7 +417,16 @@ Ota::UpgradeResult Ota::UpgradeWithResult(const std::string& firmware_url,
     std::string image_header;
 
     auto network = Board::GetInstance().GetNetwork();
+    if (network == nullptr) {
+        ESP_LOGE(TAG, "Network is not ready for OTA upgrade");
+        return UpgradeResult::Failed;
+    }
+
     auto http = network->CreateHttp(0);
+    if (http == nullptr) {
+        ESP_LOGE(TAG, "Failed to create OTA download HTTP client");
+        return UpgradeResult::Failed;
+    }
     
     if (!http->Open("GET", firmware_url)) {
         if (is_cancelled()) {
@@ -594,7 +622,25 @@ std::vector<int> Ota::ParseVersion(const std::string& version) {
     std::string segment;
 
     while (std::getline(ss, segment, '.')) {
-        versionNumbers.push_back(std::stoi(segment));
+        if (segment.empty()) {
+            ESP_LOGW(TAG, "Invalid empty version segment: %s", version.c_str());
+            return {};
+        }
+
+        int value = 0;
+        for (char ch : segment) {
+            if (ch < '0' || ch > '9') {
+                ESP_LOGW(TAG, "Invalid version segment: %s", version.c_str());
+                return {};
+            }
+            const int digit = ch - '0';
+            if (value > (std::numeric_limits<int>::max() - digit) / 10) {
+                ESP_LOGW(TAG, "Version segment overflow: %s", version.c_str());
+                return {};
+            }
+            value = value * 10 + digit;
+        }
+        versionNumbers.push_back(value);
     }
 
     return versionNumbers;
@@ -613,6 +659,11 @@ std::vector<int> Ota::ParseVersion(const std::string& version) {
 bool Ota::IsNewVersionAvailable(const std::string& currentVersion, const std::string& newVersion) {
     std::vector<int> current = ParseVersion(currentVersion);
     std::vector<int> newer = ParseVersion(newVersion);
+    if (current.empty() || newer.empty()) {
+        ESP_LOGW(TAG, "Skip OTA version compare: current=%s, new=%s",
+                 currentVersion.c_str(), newVersion.c_str());
+        return false;
+    }
 
     for (size_t i = 0; i < std::min(current.size(), newer.size()); ++i) {
         if (newer[i] > current[i]) {
