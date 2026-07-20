@@ -971,7 +971,7 @@ private:
     void StopWifiNow() {
         MqttControl::GetInstance().StopForNetworkSwitch();
         esp_timer_stop(connect_timer_);
-        StopWifiConfigCountdown();
+        ClearManualWifiConfigMode();
         in_config_mode_ = false;
         auto& wifi_manager = WifiManager::GetInstance();
         if (wifi_manager.IsConfigMode()) {

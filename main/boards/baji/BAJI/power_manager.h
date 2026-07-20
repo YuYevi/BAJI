@@ -67,6 +67,7 @@ private:
     uint16_t power_key_debounce_ticks_ = 0;
     uint16_t power_key_press_ticks_ = 0;
     uint16_t power_key_click_window_ticks_ = 0;
+    uint16_t power_key_click_guard_ticks_ = 0;
     uint8_t power_key_click_count_ = 0;
 
     static constexpr uint16_t kPowerKeyDebounceTicks =
@@ -75,6 +76,8 @@ private:
         (POWER_KEY_SHUTDOWN_HOLD_MS + POWER_KEY_SCAN_INTERVAL_MS - 1) / POWER_KEY_SCAN_INTERVAL_MS;
     static constexpr uint16_t kPowerKeyDoubleClickWindowTicks =
         (POWER_KEY_DOUBLE_CLICK_WINDOW_MS + POWER_KEY_SCAN_INTERVAL_MS - 1) / POWER_KEY_SCAN_INTERVAL_MS;
+    static constexpr uint16_t kPowerKeyMultiClickGuardTicks =
+        (POWER_KEY_MULTI_CLICK_GUARD_MS + POWER_KEY_SCAN_INTERVAL_MS - 1) / POWER_KEY_SCAN_INTERVAL_MS;
 
     std::function<void(PowerUiHint)> on_power_ui_;
     std::function<void()> on_power_single_click_;
@@ -113,7 +116,8 @@ private:
     }
 
     void OnPowerKeyStablePress() {
-        if (power_key_click_count_ > 0 &&
+        if (power_key_click_guard_ticks_ == 0 &&
+            power_key_click_count_ > 0 &&
             power_key_click_window_ticks_ >= kPowerKeyDoubleClickWindowTicks) {
             FinalizePowerKeyClicks();
         }
@@ -122,6 +126,13 @@ private:
     }
 
     void OnPowerKeyStableRelease() {
+        if (power_key_click_guard_ticks_ > 0) {
+            ResetPowerKeyClickState();
+            power_key_press_ticks_ = 0;
+            power_key_long_press_handled_ = false;
+            return;
+        }
+
         if (power_key_ignore_release_) {
             power_key_ignore_release_ = false;
             power_key_press_ticks_ = 0;
@@ -143,6 +154,7 @@ private:
 
         if (power_key_click_count_ >= 3) {
             ResetPowerKeyClickState();
+            power_key_click_guard_ticks_ = kPowerKeyMultiClickGuardTicks;
             if (on_power_triple_click_) {
                 on_power_triple_click_();
             }
@@ -173,6 +185,21 @@ private:
             }
         }
 
+        if (power_key_click_guard_ticks_ > 0) {
+            if (power_key_stable_pressed_) {
+                // Keep the guard active while the key is pressed, but still
+                // allow a deliberate long press to reach the shutdown logic.
+                power_key_click_guard_ticks_ = kPowerKeyMultiClickGuardTicks;
+            } else {
+                power_key_press_ticks_ = 0;
+                power_key_long_press_handled_ = false;
+                if (!power_key_raw_pressed_) {
+                    power_key_click_guard_ticks_--;
+                }
+                return;
+            }
+        }
+
         if (power_key_stable_pressed_) {
             if (power_key_press_ticks_ < kPowerKeyShutdownHoldTicks) {
                 power_key_press_ticks_++;
@@ -187,7 +214,8 @@ private:
             return;
         }
 
-        if (power_key_click_count_ > 0 && power_key_click_count_ < 3) {
+        if (!power_key_raw_pressed_ &&
+            power_key_click_count_ > 0 && power_key_click_count_ < 3) {
             if (power_key_click_window_ticks_ < kPowerKeyDoubleClickWindowTicks) {
                 power_key_click_window_ticks_++;
             }

@@ -41,6 +41,7 @@
 #define POWER_KEY_SCAN_INTERVAL_MS              20   // 电源键扫描周期(ms)
 #define POWER_KEY_DEBOUNCE_MS                   40   // 电源键按下/释放去抖(ms)
 #define POWER_KEY_DOUBLE_CLICK_WINDOW_MS        250  // 电源键双击窗口(ms)
+#define POWER_KEY_MULTI_CLICK_GUARD_MS           300  // 三击后需保持稳定释放的保护时间(ms)
 #define POWER_KEY_SHUTDOWN_HOLD_MS              2600 // 电源键长按关机时间(ms)
 #define POWER_CHARGING_FULLSCREEN_BACKLIGHT     5    // 充电全屏背光
 #define POWER_KEY_HOLD_MS_TO_BOOT               3000 // 开机键按住时间(ms)

@@ -21,7 +21,6 @@
 #endif
 
 static constexpr int CONNECT_TIMEOUT_SEC = 8;
-static constexpr int MANUAL_WIFI_CONFIG_TIMEOUT_SEC = 60;
 
 WifiBoard::WifiBoard() {
     
@@ -33,25 +32,12 @@ WifiBoard::WifiBoard() {
         .skip_unhandled_events = true
     };
     esp_timer_create(&timer_args, &connect_timer_);
-
-    esp_timer_create_args_t countdown_timer_args = {
-        .callback = OnWifiConfigCountdown,
-        .arg = this,
-        .dispatch_method = ESP_TIMER_TASK,
-        .name = "wifi_cfg_countdown",
-        .skip_unhandled_events = true
-    };
-    esp_timer_create(&countdown_timer_args, &wifi_config_countdown_timer_);
 }
 
 WifiBoard::~WifiBoard() {
     if (connect_timer_) {
         esp_timer_stop(connect_timer_);
         esp_timer_delete(connect_timer_);
-    }
-    if (wifi_config_countdown_timer_) {
-        esp_timer_stop(wifi_config_countdown_timer_);
-        esp_timer_delete(wifi_config_countdown_timer_);
     }
 }
 
@@ -120,7 +106,7 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
         case NetworkEvent::Connected:
             
             esp_timer_stop(connect_timer_);
-            StopWifiConfigCountdown();
+            ClearManualWifiConfigMode();
             wifi_scan_notified_ = false;
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
             
@@ -154,7 +140,7 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
             break;
         case NetworkEvent::WifiConfigModeExit:
             
-            StopWifiConfigCountdown();
+            ClearManualWifiConfigMode();
             wifi_scan_notified_ = false;
             in_config_mode_ = false;
             Application::GetInstance().Schedule([]() {
@@ -196,7 +182,7 @@ void WifiBoard::OnWifiConnectTimeout(void* arg) {
     auto& wifi_manager = WifiManager::GetInstance();
 
     if (wifi_manager.IsConnected()) {
-        board->StopWifiConfigCountdown();
+        board->ClearManualWifiConfigMode();
         board->wifi_scan_notified_ = false;
         board->in_config_mode_ = false;
         return;
@@ -206,65 +192,8 @@ void WifiBoard::OnWifiConnectTimeout(void* arg) {
     board->StartWifiConfigMode();
 }
 
-void WifiBoard::StartWifiConfigCountdown() {
-    if (!manual_wifi_config_mode_ || wifi_config_countdown_timer_ == nullptr) {
-        return;
-    }
-
-    esp_timer_stop(wifi_config_countdown_timer_);
-    if (wifi_config_countdown_seconds_ <= 0) {
-        wifi_config_countdown_seconds_ = MANUAL_WIFI_CONFIG_TIMEOUT_SEC;
-        UpdateWifiConfigCountdownNotification();
-    }
-    ESP_ERROR_CHECK(esp_timer_start_periodic(wifi_config_countdown_timer_, 1000000));
-}
-
-void WifiBoard::StopWifiConfigCountdown() {
-    if (wifi_config_countdown_timer_) {
-        esp_timer_stop(wifi_config_countdown_timer_);
-    }
+void WifiBoard::ClearManualWifiConfigMode() {
     manual_wifi_config_mode_ = false;
-    wifi_config_countdown_seconds_ = 0;
-}
-
-void WifiBoard::UpdateWifiConfigCountdownNotification() const {
-    if (!manual_wifi_config_mode_ || wifi_config_countdown_seconds_ <= 0) {
-        return;
-    }
-
-    std::string message = std::string(Lang::Strings::ENTERING_WIFI_CONFIG_MODE) +
-                          std::to_string(wifi_config_countdown_seconds_);
-    Application::GetInstance().Schedule([message]() {
-        auto* display = Board::GetInstance().GetDisplay();
-        if (display != nullptr) {
-            display->ShowPersistentNotification(message.c_str(), true);
-        }
-    });
-}
-
-void WifiBoard::OnWifiConfigCountdownTick() {
-    if (!manual_wifi_config_mode_) {
-        return;
-    }
-
-    if (!WifiManager::GetInstance().IsConfigMode()) {
-        StopWifiConfigCountdown();
-        return;
-    }
-
-    if (wifi_config_countdown_seconds_ > 1) {
-        wifi_config_countdown_seconds_--;
-        UpdateWifiConfigCountdownNotification();
-        return;
-    }
-
-    StopWifiConfigCountdown();
-    WifiManager::GetInstance().StopConfigAp();
-}
-
-void WifiBoard::OnWifiConfigCountdown(void* arg) {
-    auto* board = static_cast<WifiBoard*>(arg);
-    board->OnWifiConfigCountdownTick();
 }
 
 void WifiBoard::StartWifiConfigMode() {
@@ -280,14 +209,13 @@ void WifiBoard::StartWifiConfigMode() {
     Application::GetInstance().SetDeviceState(kDeviceStateWifiConfiguring);
 #ifdef CONFIG_USE_HOTSPOT_WIFI_PROVISIONING
     auto& wifi_manager = WifiManager::GetInstance();
-    bool show_top_mode_label = !manual_wifi_config_mode_;
 
     wifi_manager.StartConfigAp();
 
     
     auto ap_ssid = wifi_manager.GetApSsid();
     auto ap_url = wifi_manager.GetApWebUrl();
-    Application::GetInstance().Schedule([ap_ssid = std::move(ap_ssid), ap_url = std::move(ap_url), show_top_mode_label]() {
+    Application::GetInstance().Schedule([ap_ssid = std::move(ap_ssid), ap_url = std::move(ap_url)]() {
         std::string hint = Lang::Strings::CONNECT_TO_HOTSPOT;
         hint += ap_ssid;
         hint += Lang::Strings::ACCESS_VIA_BROWSER;
@@ -295,9 +223,7 @@ void WifiBoard::StartWifiConfigMode() {
 
         auto* display = Board::GetInstance().GetDisplay();
         if (display != nullptr) {
-            if (show_top_mode_label) {
-                display->ShowPersistentNotification(Lang::Strings::WIFI_CONFIG_MODE, true);
-            }
+            display->ShowPersistentNotification(Lang::Strings::WIFI_CONFIG_MODE, true);
             // Keep the hotspot info visible on any smartwatch screen instead of
             // only inside the AI chat page's message area.
             display->ShowPersistentNotification(hint.c_str(), false);
@@ -310,7 +236,6 @@ void WifiBoard::StartWifiConfigMode() {
     blufi.init();
 #else
 #endif
-    StartWifiConfigCountdown();
 #if CONFIG_USE_ACOUSTIC_WIFI_PROVISIONING
     
     auto codec = Board::GetInstance().GetAudioCodec();
@@ -330,15 +255,13 @@ void WifiBoard::StartWifiConfigMode() {
 
 void WifiBoard::EnterWifiConfigMode() {
     manual_wifi_config_mode_ = true;
-    wifi_config_countdown_seconds_ = MANUAL_WIFI_CONFIG_TIMEOUT_SEC;
-    UpdateWifiConfigCountdownNotification();
 
     auto& app = Application::GetInstance();
     auto& wifi_manager = WifiManager::GetInstance();
     auto state = app.GetDeviceState();
 
-    // If manual config mode is already active, another triple-click should
-    // cancel it immediately instead of refreshing the countdown.
+    // If another path already opened config mode, take ownership so the next
+    // triple-click can close it.
     if (wifi_manager.IsConfigMode()) {
         in_config_mode_ = true;
         app.SetDeviceState(kDeviceStateWifiConfiguring);
@@ -368,7 +291,7 @@ void WifiBoard::EnterWifiConfigMode() {
     }
 
     if (state != kDeviceStateStarting) {
-        StopWifiConfigCountdown();
+        ClearManualWifiConfigMode();
         return;
     }
 
@@ -385,7 +308,7 @@ bool WifiBoard::ExitManualWifiConfigMode() {
         return false;
     }
 
-    StopWifiConfigCountdown();
+    ClearManualWifiConfigMode();
     wifi_manager.StopConfigAp();
     return true;
 }

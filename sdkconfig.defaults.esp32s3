@@ -39,7 +39,7 @@ CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE=1536
 CONFIG_LV_USE_SNAPSHOT=y
 
 # OTA (default; can be overridden by NVS Settings("wifi").ota_url)
-CONFIG_OTA_URL="https://api.tenclass.net/xiaozhi/ota/"
+CONFIG_OTA_URL="https://www.xinyhx.com/api/device/ota/"
 
 # Reduce firmware size by lowering default log verbosity
 CONFIG_LOG_DEFAULT_LEVEL_WARN=y

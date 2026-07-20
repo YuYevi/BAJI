@@ -9,12 +9,10 @@
 class WifiBoard : public Board {
 protected:
     esp_timer_handle_t connect_timer_ = nullptr;
-    esp_timer_handle_t wifi_config_countdown_timer_ = nullptr;
     bool in_config_mode_ = false;
     bool manual_wifi_config_mode_ = false;
     bool suppress_config_exit_reconnect_ = false;
     bool wifi_scan_notified_ = false;
-    int wifi_config_countdown_seconds_ = 0;
     NetworkEventCallback network_event_callback_ = nullptr;
     bool wifi_auto_reconnect_enabled_ = true;
 
@@ -29,16 +27,12 @@ protected:
     
     void StartWifiConfigMode();
 
-    void StartWifiConfigCountdown();
-    void StopWifiConfigCountdown();
-    void UpdateWifiConfigCountdownNotification() const;
-    void OnWifiConfigCountdownTick();
+    void ClearManualWifiConfigMode();
 
     void SetWifiAutoReconnectEnabled(bool enabled);
 
     
     static void OnWifiConnectTimeout(void* arg);
-    static void OnWifiConfigCountdown(void* arg);
 
 public:
     WifiBoard();
