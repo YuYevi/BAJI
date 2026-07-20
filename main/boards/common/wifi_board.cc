@@ -112,14 +112,8 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
             
             Blufi::GetInstance().deinit();
 #endif
-            in_config_mode_ = false;
-            Application::GetInstance().Schedule([]() {
-                auto* display = Board::GetInstance().GetDisplay();
-                if (display != nullptr) {
-                    display->ShowPersistentNotification("", true);
-                    display->ShowPersistentNotification("", false);
-                }
-            });
+            in_config_mode_.store(false);
+            ClearWifiConfigNotifications();
             
             break;
         case NetworkEvent::Scanning:
@@ -136,20 +130,14 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
             break;
         case NetworkEvent::WifiConfigModeEnter:
             wifi_scan_notified_ = false;
-            in_config_mode_ = true;
+            in_config_mode_.store(true);
             break;
         case NetworkEvent::WifiConfigModeExit:
             
             ClearManualWifiConfigMode();
             wifi_scan_notified_ = false;
-            in_config_mode_ = false;
-            Application::GetInstance().Schedule([]() {
-                auto* display = Board::GetInstance().GetDisplay();
-                if (display != nullptr) {
-                    display->ShowPersistentNotification("", true);
-                    display->ShowPersistentNotification("", false);
-                }
-            });
+            in_config_mode_.store(false);
+            ClearWifiConfigNotifications();
             
             if (suppress_config_exit_reconnect_) {
                 suppress_config_exit_reconnect_ = false;
@@ -184,7 +172,8 @@ void WifiBoard::OnWifiConnectTimeout(void* arg) {
     if (wifi_manager.IsConnected()) {
         board->ClearManualWifiConfigMode();
         board->wifi_scan_notified_ = false;
-        board->in_config_mode_ = false;
+        board->in_config_mode_.store(false);
+        board->ClearWifiConfigNotifications();
         return;
     }
 
@@ -193,29 +182,56 @@ void WifiBoard::OnWifiConnectTimeout(void* arg) {
 }
 
 void WifiBoard::ClearManualWifiConfigMode() {
-    manual_wifi_config_mode_ = false;
+    std::lock_guard<std::mutex> lock(wifi_config_lifecycle_mutex_);
+    manual_wifi_config_mode_.store(false);
+    wifi_config_generation_.fetch_add(1);
 }
 
-void WifiBoard::StartWifiConfigMode() {
-    if (in_config_mode_ || WifiManager::GetInstance().IsConfigMode()) {
-        return;
+uint32_t WifiBoard::BeginWifiConfigSession(bool manual) {
+    std::lock_guard<std::mutex> lock(wifi_config_lifecycle_mutex_);
+    if (manual) {
+        manual_wifi_config_mode_.store(true);
     }
-    if (!manual_wifi_config_mode_ && WifiManager::GetInstance().IsConnected()) {
-        return;
+    return wifi_config_generation_.fetch_add(1) + 1;
+}
+
+bool WifiBoard::IsWifiConfigSessionCurrent(uint32_t generation) const {
+    return generation != 0 && wifi_config_generation_.load() == generation;
+}
+
+void WifiBoard::CancelWifiConfigSessionIfCurrent(uint32_t generation) {
+    std::lock_guard<std::mutex> lock(wifi_config_lifecycle_mutex_);
+    uint32_t expected = generation;
+    if (generation != 0 &&
+        wifi_config_generation_.compare_exchange_strong(expected, generation + 1)) {
+        manual_wifi_config_mode_.store(false);
     }
-    in_config_mode_ = true;
-    wifi_scan_notified_ = false;
-    
-    Application::GetInstance().SetDeviceState(kDeviceStateWifiConfiguring);
-#ifdef CONFIG_USE_HOTSPOT_WIFI_PROVISIONING
-    auto& wifi_manager = WifiManager::GetInstance();
+}
 
-    wifi_manager.StartConfigAp();
+void WifiBoard::ClearWifiConfigNotifications() {
+    std::lock_guard<std::mutex> lock(wifi_config_lifecycle_mutex_);
+    auto* display = Board::GetInstance().GetDisplay();
+    if (display != nullptr) {
+        display->ShowPersistentNotification("", true);
+        display->ShowPersistentNotification("", false);
+    }
+}
 
-    
-    auto ap_ssid = wifi_manager.GetApSsid();
-    auto ap_url = wifi_manager.GetApWebUrl();
-    Application::GetInstance().Schedule([ap_ssid = std::move(ap_ssid), ap_url = std::move(ap_url)]() {
+void WifiBoard::ScheduleWifiConfigNotification(uint32_t generation) {
+    Application::GetInstance().Schedule([this, generation]() {
+        std::lock_guard<std::mutex> lock(wifi_config_lifecycle_mutex_);
+        auto& wifi_manager = WifiManager::GetInstance();
+        if (!IsWifiConfigSessionCurrent(generation) || !wifi_manager.IsConfigMode()) {
+            return;
+        }
+
+        auto ap_ssid = wifi_manager.GetApSsid();
+        auto ap_url = wifi_manager.GetApWebUrl();
+        if (ap_ssid.empty() || ap_url.empty() ||
+            !IsWifiConfigSessionCurrent(generation) || !wifi_manager.IsConfigMode()) {
+            return;
+        }
+
         std::string hint = Lang::Strings::CONNECT_TO_HOTSPOT;
         hint += ap_ssid;
         hint += Lang::Strings::ACCESS_VIA_BROWSER;
@@ -228,8 +244,43 @@ void WifiBoard::StartWifiConfigMode() {
             // only inside the AI chat page's message area.
             display->ShowPersistentNotification(hint.c_str(), false);
         }
-        Application::GetInstance().Alert(Lang::Strings::WIFI_CONFIG_MODE, hint.c_str(), "gear", Lang::Sounds::OGG_WIFICONFIG);
+        Application::GetInstance().Alert(Lang::Strings::WIFI_CONFIG_MODE, hint.c_str(),
+                                         "gear", Lang::Sounds::OGG_WIFICONFIG);
     });
+}
+
+void WifiBoard::StartWifiConfigMode(uint32_t expected_generation) {
+    auto& wifi_manager = WifiManager::GetInstance();
+    if (expected_generation != 0 && !IsWifiConfigSessionCurrent(expected_generation)) {
+        return;
+    }
+    if (in_config_mode_.load() || wifi_manager.IsConfigMode()) {
+        return;
+    }
+    if (!manual_wifi_config_mode_.load() && wifi_manager.IsConnected()) {
+        return;
+    }
+
+    const uint32_t generation = expected_generation != 0
+        ? expected_generation
+        : BeginWifiConfigSession();
+    if (!IsWifiConfigSessionCurrent(generation)) {
+        return;
+    }
+
+    in_config_mode_.store(true);
+    wifi_scan_notified_ = false;
+
+    Application::GetInstance().SetDeviceState(kDeviceStateWifiConfiguring);
+#ifdef CONFIG_USE_HOTSPOT_WIFI_PROVISIONING
+    wifi_manager.StartConfigAp();
+    if (!wifi_manager.IsConfigMode()) {
+        in_config_mode_.store(false);
+        CancelWifiConfigSessionIfCurrent(generation);
+        ClearWifiConfigNotifications();
+        return;
+    }
+    ScheduleWifiConfigNotification(generation);
 #elif CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     auto &blufi = Blufi::GetInstance();
     
@@ -254,7 +305,7 @@ void WifiBoard::StartWifiConfigMode() {
 }
 
 void WifiBoard::EnterWifiConfigMode() {
-    manual_wifi_config_mode_ = true;
+    const uint32_t generation = BeginWifiConfigSession(true);
 
     auto& app = Application::GetInstance();
     auto& wifi_manager = WifiManager::GetInstance();
@@ -263,8 +314,9 @@ void WifiBoard::EnterWifiConfigMode() {
     // If another path already opened config mode, take ownership so the next
     // triple-click can close it.
     if (wifi_manager.IsConfigMode()) {
-        in_config_mode_ = true;
+        in_config_mode_.store(true);
         app.SetDeviceState(kDeviceStateWifiConfiguring);
+        ScheduleWifiConfigNotification(generation);
         return;
     }
 
@@ -272,21 +324,43 @@ void WifiBoard::EnterWifiConfigMode() {
         
         Application::GetInstance().ResetProtocol();
 
-        xTaskCreate([](void* arg) {
-            auto* board = static_cast<WifiBoard*>(arg);
+        struct WifiConfigDelayContext {
+            WifiBoard* board;
+            uint32_t generation;
+        };
+        auto* context = new WifiConfigDelayContext{this, generation};
+
+        if (xTaskCreate([](void* arg) {
+            auto* context = static_cast<WifiConfigDelayContext*>(arg);
+            auto* board = context->board;
+            const uint32_t generation = context->generation;
+            delete context;
 
             
             vTaskDelay(pdMS_TO_TICKS(1000));
+
+            if (!board->IsWifiConfigSessionCurrent(generation)) {
+                vTaskDelete(NULL);
+                return;
+            }
 
             
             esp_timer_stop(board->connect_timer_);
             WifiManager::GetInstance().StopStation();
 
+            if (!board->IsWifiConfigSessionCurrent(generation)) {
+                vTaskDelete(NULL);
+                return;
+            }
+
             
-            board->StartWifiConfigMode();
+            board->StartWifiConfigMode(generation);
 
             vTaskDelete(NULL);
-        }, "wifi_cfg_delay", 4096, this, 2, NULL);
+        }, "wifi_cfg_delay", 4096, context, 2, NULL) != pdPASS) {
+            delete context;
+            CancelWifiConfigSessionIfCurrent(generation);
+        }
         return;
     }
 
@@ -299,16 +373,17 @@ void WifiBoard::EnterWifiConfigMode() {
     esp_timer_stop(connect_timer_);
     WifiManager::GetInstance().StopStation();
 
-    StartWifiConfigMode();
+    StartWifiConfigMode(generation);
 }
 
 bool WifiBoard::ExitManualWifiConfigMode() {
     auto& wifi_manager = WifiManager::GetInstance();
-    if (!manual_wifi_config_mode_ || !wifi_manager.IsConfigMode()) {
+    if (!manual_wifi_config_mode_.load() || !wifi_manager.IsConfigMode()) {
         return false;
     }
 
     ClearManualWifiConfigMode();
+    ClearWifiConfigNotifications();
     wifi_manager.StopConfigAp();
     return true;
 }
@@ -318,7 +393,7 @@ bool WifiBoard::IsInWifiConfigMode() const {
 }
 
 bool WifiBoard::IsManualWifiConfigMode() const {
-    return manual_wifi_config_mode_;
+    return manual_wifi_config_mode_.load();
 }
 
 NetworkInterface* WifiBoard::GetNetwork() {

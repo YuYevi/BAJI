@@ -54,6 +54,10 @@ static const int32_t kWallpaperCardWidth = 100;
 static const int32_t kWallpaperCardHeight = 136;
 static const int32_t kWallpaperImageWidth = 96;
 static const int32_t kWallpaperImageHeight = 132;
+static const int32_t kWallpaperTabBarWidth = 186;
+static const int32_t kWallpaperTabBarHeight = 38;
+static const int32_t kWallpaperTabButtonWidth = 88;
+static const int32_t kWallpaperTabButtonHeight = 32;
 
 static uint8_t wallpaper_current_mode(void)
 {
@@ -204,8 +208,8 @@ static lv_obj_t * make_tab_btn(lv_obj_t * parent, const char * text, int32_t w)
 {
     lv_obj_t * btn = lv_btn_create(parent);
     lv_obj_remove_style_all(btn);
-    lv_obj_set_size(btn, w, 32);
-    lv_obj_set_style_radius(btn, 999, 0);
+    lv_obj_set_size(btn, w, kWallpaperTabButtonHeight);
+    lv_obj_set_style_radius(btn, kWallpaperTabButtonHeight / 2, 0);
     lv_obj_set_style_bg_color(btn, lv_color_white(), 0);
 
     lv_obj_t * lbl = lv_label_create(btn);
@@ -252,6 +256,10 @@ static void apply_tab_style(void)
         lv_obj_set_style_bg_grad(tab_btns[i], a ? &tab_grad : NULL, 0);
         lv_obj_set_style_text_color(tab_btns[i], a ? lv_color_black() : lv_color_white(), 0);
         lv_obj_set_style_text_opa(tab_btns[i], a ? LV_OPA_COVER : (lv_opa_t)(LV_OPA_COVER * 80 / 100), 0);
+        lv_obj_set_style_shadow_width(tab_btns[i], a ? 8 : 0, 0);
+        lv_obj_set_style_shadow_color(tab_btns[i], lv_color_hex(0xf472b6), 0);
+        lv_obj_set_style_shadow_opa(tab_btns[i],
+                                    a ? (lv_opa_t)(LV_OPA_COVER * 18 / 100) : LV_OPA_0, 0);
     }
 }
 
@@ -418,18 +426,22 @@ void ui_WallpaperScreen_init(void) {
     lv_obj_set_style_text_letter_space(title, 1, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 54);
 
-    lv_obj_t * tabs = make_transp_cont(ui_WallpaperScreen, 212, 40);
-    lv_obj_align(tabs, LV_ALIGN_TOP_MID, 0, 102);
-    lv_obj_set_style_pad_all(tabs, 4, 0);
-    lv_obj_set_style_pad_gap(tabs, 8, 0);
-    lv_obj_set_style_radius(tabs, 999, 0);
+    lv_obj_t * tabs = make_transp_cont(ui_WallpaperScreen,
+                                       kWallpaperTabBarWidth, kWallpaperTabBarHeight);
+    lv_obj_align(tabs, LV_ALIGN_TOP_MID, 0, 92);
+    lv_obj_set_style_pad_all(tabs, 3, 0);
+    lv_obj_set_style_pad_gap(tabs, 4, 0);
+    lv_obj_set_style_radius(tabs, kWallpaperTabBarHeight / 2, 0);
     lv_obj_set_style_bg_color(tabs, lv_color_white(), 0);
-    lv_obj_set_style_bg_opa(tabs, (lv_opa_t)(LV_OPA_COVER * 6 / 100), 0);
+    lv_obj_set_style_bg_opa(tabs, (lv_opa_t)(LV_OPA_COVER * 9 / 100), 0);
+    lv_obj_set_style_border_width(tabs, 1, 0);
+    lv_obj_set_style_border_color(tabs, lv_color_white(), 0);
+    lv_obj_set_style_border_opa(tabs, (lv_opa_t)(LV_OPA_COVER * 4 / 100), 0);
     lv_obj_set_flex_flow(tabs, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(tabs, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    tab_btns[0] = make_tab_btn(tabs, "单图", 88);
-    tab_btns[1] = make_tab_btn(tabs, "轮播", 88);
+    tab_btns[0] = make_tab_btn(tabs, "单图", kWallpaperTabButtonWidth);
+    tab_btns[1] = make_tab_btn(tabs, "多图", kWallpaperTabButtonWidth);
 
     for(uint32_t i = 0; i < 2; i++)
         lv_obj_add_event_cb(tab_btns[i], tab_event_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)i);

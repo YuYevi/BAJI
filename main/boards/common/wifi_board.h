@@ -2,6 +2,9 @@
 #define WIFI_BOARD_H
 
 #include "board.h"
+#include <atomic>
+#include <cstdint>
+#include <mutex>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include <esp_timer.h>
@@ -9,8 +12,12 @@
 class WifiBoard : public Board {
 protected:
     esp_timer_handle_t connect_timer_ = nullptr;
-    bool in_config_mode_ = false;
-    bool manual_wifi_config_mode_ = false;
+    std::atomic_bool in_config_mode_{false};
+    std::atomic_bool manual_wifi_config_mode_{false};
+    // Invalidates delayed start and notification work from older config sessions.
+    std::atomic<uint32_t> wifi_config_generation_{0};
+    // Orders session changes with persistent-notification show/clear operations.
+    std::mutex wifi_config_lifecycle_mutex_;
     bool suppress_config_exit_reconnect_ = false;
     bool wifi_scan_notified_ = false;
     NetworkEventCallback network_event_callback_ = nullptr;
@@ -25,9 +32,19 @@ protected:
     void TryWifiConnect();
 
     
-    void StartWifiConfigMode();
+    void StartWifiConfigMode(uint32_t expected_generation = 0);
 
     void ClearManualWifiConfigMode();
+
+    uint32_t BeginWifiConfigSession(bool manual = false);
+
+    bool IsWifiConfigSessionCurrent(uint32_t generation) const;
+
+    void CancelWifiConfigSessionIfCurrent(uint32_t generation);
+
+    void ScheduleWifiConfigNotification(uint32_t generation);
+
+    void ClearWifiConfigNotifications();
 
     void SetWifiAutoReconnectEnabled(bool enabled);
 
