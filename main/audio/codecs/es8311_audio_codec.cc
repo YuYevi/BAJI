@@ -97,6 +97,16 @@ Es8311AudioCodec::~Es8311AudioCodec() {
 
 void Es8311AudioCodec::UpdateDeviceState() {
     if ((input_enabled_ || output_enabled_) && dev_ == nullptr) {
+        // esp_codec_dev_open() reconfigures the I2S format by disabling both
+        // channels first. Re-enable channels closed by the previous device
+        // instance so that this expected transition is not reported as an
+        // invalid disable operation by the I2S driver.
+        if (!i2s_channels_enabled_) {
+            ESP_ERROR_CHECK(i2s_channel_enable(tx_handle_));
+            ESP_ERROR_CHECK(i2s_channel_enable(rx_handle_));
+            i2s_channels_enabled_ = true;
+        }
+
         esp_codec_dev_cfg_t dev_cfg = {
             .dev_type = ESP_CODEC_DEV_TYPE_IN_OUT,
             .codec_if = codec_if_,
@@ -118,6 +128,7 @@ void Es8311AudioCodec::UpdateDeviceState() {
     } else if (!input_enabled_ && !output_enabled_ && dev_ != nullptr) {
         esp_codec_dev_close(dev_);
         dev_ = nullptr;
+        i2s_channels_enabled_ = false;
     }
     if (pa_pin_ != GPIO_NUM_NC) {
         int level = output_enabled_ ? 1 : 0;
@@ -224,6 +235,7 @@ void Es8311AudioCodec::CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gp
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(rx_handle_, &rx_cfg));
     ESP_ERROR_CHECK(i2s_channel_enable(tx_handle_));
     ESP_ERROR_CHECK(i2s_channel_enable(rx_handle_));
+    i2s_channels_enabled_ = true;
     
 }
 

@@ -108,12 +108,6 @@ static void Baji185InitLcdTeSync()
         return;
     }
 
-    ret = gpio_install_isr_service(0);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "LCD TE sync disabled: gpio_install_isr_service failed: %s", esp_err_to_name(ret));
-        return;
-    }
-
     gpio_intr_disable(QSPI_PIN_NUM_LCD_TE);
     ret = gpio_isr_handler_add(QSPI_PIN_NUM_LCD_TE, Baji185LcdTeIsr, nullptr);
     if (ret == ESP_ERR_INVALID_STATE) {
@@ -185,7 +179,14 @@ static void Baji185LcdTeDisplayEvent(lv_event_t* event)
 
 extern "C" void baji_lcd_te_attach_display(lv_display_t* display)
 {
-    if (display == nullptr || !s_baji_lcd_te_ready.load()) {
+    if (display == nullptr) {
+        return;
+    }
+
+    // Touch initialization installs the shared GPIO ISR service first.
+    // TE synchronization only needs to add its per-pin handler.
+    Baji185InitLcdTeSync();
+    if (!s_baji_lcd_te_ready.load()) {
         return;
     }
 
@@ -522,8 +523,6 @@ SpiLcdDisplay* baji_185_create_lcd_display(bool quiet_boot)
     esp_lcd_panel_disp_on_off(panel, true);
     esp_lcd_panel_swap_xy(panel, DISPLAY_SWAP_XY);
     esp_lcd_panel_mirror(panel, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
-    Baji185InitLcdTeSync();
-
     return new SpiLcdDisplay(panel_io, panel,
                              DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X,
                              DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY, !quiet_boot);

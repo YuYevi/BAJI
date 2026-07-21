@@ -341,9 +341,6 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
 
     // 添加显示设备
     display_ = lvgl_port_add_disp(&display_cfg);
-    if (display_ != nullptr && baji_lcd_te_attach_display) {
-        baji_lcd_te_attach_display(display_);
-    }
     if (display_ == nullptr) {
         return;
     }
@@ -354,6 +351,9 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     }
     
     InitializeTouch();
+    if (baji_lcd_te_attach_display) {
+        baji_lcd_te_attach_display(display_);
+    }
 }
 
 
