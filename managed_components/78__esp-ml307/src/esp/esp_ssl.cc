@@ -2,6 +2,7 @@
 #include <esp_log.h>
 #include <esp_crt_bundle.h>
 #include <cstring>
+#include <sys/select.h>
 #include <unistd.h>
 
 static const char *TAG = "EspSsl";
@@ -24,6 +25,8 @@ bool EspSsl::Connect(const std::string& host, int port) {
         ESP_LOGE(TAG, "tls client has been initialized");
         return false;
     }
+
+    disconnect_requested_.store(false);
 
     tls_client_ = esp_tls_init();
     if (tls_client_ == nullptr) {
@@ -64,17 +67,25 @@ bool EspSsl::Connect(const std::string& host, int port) {
 }
 
 void EspSsl::Disconnect() {
+    // Closing the socket wakes ReceiveTask with a read error. Mark this as an
+    // expected shutdown so it is not reported as a transport failure.
+    disconnect_requested_.store(true);
     connected_ = false;
     
     // Close socket if it is open
     if (tls_client_ != nullptr) {
-        int sockfd;
-        ESP_ERROR_CHECK(esp_tls_get_conn_sockfd(tls_client_, &sockfd));
-        if (sockfd >= 0) {
-            close(sockfd);
-        }
-    
         auto bits = xEventGroupWaitBits(event_group_, ESP_SSL_EVENT_RECEIVE_TASK_EXIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(10000));
+        if (!(bits & ESP_SSL_EVENT_RECEIVE_TASK_EXIT)) {
+            // This should only be needed if the receive task is stuck outside
+            // select(). Keep the force-close fallback to avoid leaking TLS state.
+            int sockfd;
+            ESP_ERROR_CHECK(esp_tls_get_conn_sockfd(tls_client_, &sockfd));
+            if (sockfd >= 0) {
+                close(sockfd);
+            }
+            bits = xEventGroupWaitBits(event_group_, ESP_SSL_EVENT_RECEIVE_TASK_EXIT,
+                                       pdFALSE, pdFALSE, pdMS_TO_TICKS(1000));
+        }
         if (!(bits & ESP_SSL_EVENT_RECEIVE_TASK_EXIT)) {
             ESP_LOGE(TAG, "Failed to wait for receive task exit");
         }
@@ -117,16 +128,51 @@ int EspSsl::Send(const std::string& data) {
 
 void EspSsl::ReceiveTask() {
     std::string data;
+    bool wait_for_socket = true;
     while (connected_) {
+        if (wait_for_socket) {
+            int sockfd;
+            if (esp_tls_get_conn_sockfd(tls_client_, &sockfd) != ESP_OK || sockfd < 0) {
+                if (!disconnect_requested_.load()) {
+                    ESP_LOGE(TAG, "Failed to get TLS socket for receive");
+                }
+                break;
+            }
+
+            // Keep the read task interruptible so Disconnect() does not have to
+            // close the socket while esp_tls_conn_read() is using it.
+            fd_set read_fds;
+            FD_ZERO(&read_fds);
+            FD_SET(sockfd, &read_fds);
+            struct timeval timeout = {};
+            timeout.tv_usec = 100 * 1000;
+            int ready = select(sockfd + 1, &read_fds, nullptr, nullptr, &timeout);
+            if (!connected_) {
+                break;
+            }
+            if (ready < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                ESP_LOGE(TAG, "TLS socket select failed: errno=%d", errno);
+                break;
+            }
+            if (ready == 0) {
+                continue;
+            }
+        }
+
         data.resize(1500);
         int ret = esp_tls_conn_read(tls_client_, data.data(), data.size());
 
         if (ret == ESP_TLS_ERR_SSL_WANT_READ) {
+            wait_for_socket = true;
             continue;
         }
 
         if (ret <= 0) {
-            if (ret < 0) {
+            const bool expected_disconnect = disconnect_requested_.load();
+            if (ret < 0 && !expected_disconnect) {
                 ESP_LOGE(TAG, "SSL receive failed: %d", ret);
             }
             connected_ = false;
@@ -141,6 +187,7 @@ void EspSsl::ReceiveTask() {
             data.resize(ret);
             stream_callback_(data);
         }
+        wait_for_socket = false;
     }
 }
 
