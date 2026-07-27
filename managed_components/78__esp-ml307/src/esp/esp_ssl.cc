@@ -7,6 +7,10 @@
 
 static const char *TAG = "EspSsl";
 
+namespace {
+constexpr int kTlsConnectTimeoutMs = 30000;
+}
+
 EspSsl::EspSsl() {
     event_group_ = xEventGroupCreate();
 }
@@ -36,6 +40,7 @@ bool EspSsl::Connect(const std::string& host, int port) {
 
     esp_tls_cfg_t cfg = {};
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.timeout_ms = kTlsConnectTimeoutMs;
 
     int ret = esp_tls_conn_new_sync(host.c_str(), host.length(), port, &cfg, tls_client_);
     if (ret != 1) {

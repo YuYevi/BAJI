@@ -107,6 +107,11 @@ static const char* NetworkModeToMqttString(BoardNetworkMode mode) {
     }
 }
 
+static bool HasCachedProtocolConfig() {
+    Settings websocket_settings("websocket", false);
+    return !websocket_settings.GetString("url").empty();
+}
+
 static const char* BatteryStateToMqttString(bool charging, bool discharging) {
     if (charging) {
         return "charging";
@@ -1200,6 +1205,9 @@ void Application::HandleActivationDoneEvent() {
 void Application::ActivationTask() {
     ota_ = std::make_unique<Ota>();
 
+    auto& board = Board::GetInstance();
+    board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+
     CheckAssetsVersion();
     CheckNewVersion();
     if (ota_->HasMqttControlConfig()) {
@@ -1280,6 +1288,9 @@ void Application::CheckNewVersion() {
     bool waiting_for_activation = false;
 
     auto& board = Board::GetInstance();
+    const bool use_cached_config_on_failure =
+        board.GetActiveNetworkMode() == BoardNetworkMode::WIFI && HasCachedProtocolConfig();
+    const int max_retry = use_cached_config_on_failure ? 1 : MAX_RETRY;
     int silent_retry_count =
         board.GetActiveNetworkMode() == BoardNetworkMode::CELLULAR ? 2 : 0;
     while (true) {
@@ -1292,7 +1303,13 @@ void Application::CheckNewVersion() {
         esp_err_t err = ota_->CheckVersion();
         if (err != ESP_OK) {
             retry_count++;
-            if (retry_count >= MAX_RETRY) {
+            if (retry_count >= max_retry) {
+                if (use_cached_config_on_failure) {
+                    ESP_LOGW(TAG,
+                             "Version check failed, continue with cached protocol config: "
+                             "code=%d, url=%s",
+                             err, ota_->GetCheckVersionUrl().c_str());
+                }
                 return;
             }
 

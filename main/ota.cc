@@ -748,6 +748,9 @@ esp_err_t Ota::Activate() {
     }
 
     auto http = SetupHttp();
+    if (http == nullptr) {
+        return ESP_ERR_INVALID_STATE;
+    }
 
     std::string data = GetActivationPayload();
     http->SetContent(std::move(data));
