@@ -933,7 +933,15 @@ void Application::HandleNetworkConnectedEvent() {
         MqttControl::GetInstance().Start();
     }
 
-    if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
+    // A runtime network switch can move the application to Idle while the
+    // boot-time provisioning screen is still active. Until the first
+    // activation completes, the next successful connection must still finish
+    // startup so the normal UI is initialized.
+    const bool needs_startup_activation = !startup_activation_completed_ &&
+        (state == kDeviceStateStarting ||
+         state == kDeviceStateWifiConfiguring ||
+         state == kDeviceStateIdle);
+    if (needs_startup_activation) {
         SetDeviceState(kDeviceStateActivating);
         if (activation_task_handle_ != nullptr) {
             return;
@@ -1176,6 +1184,7 @@ void Application::HandleNetworkDisconnectedEvent() {
 
 void Application::HandleActivationDoneEvent() {
     SystemInfo::PrintHeapStats();
+    startup_activation_completed_ = true;
     SetDeviceState(kDeviceStateIdle);
 
     has_server_time_ = ota_->HasServerTime();

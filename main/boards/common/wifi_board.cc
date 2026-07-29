@@ -413,7 +413,13 @@ void WifiBoard::StartWifiConfigMode(uint32_t expected_generation) {
         auto* display = Board::GetInstance().GetDisplay();
         if (display != nullptr) {
             std::string hint = Lang::Strings::CONNECT_WITH_BLUFI;
-            hint += device_name;
+            const auto placeholder = hint.find("%s");
+            if (placeholder != std::string::npos) {
+                hint.replace(placeholder, 2, device_name);
+            } else {
+                // Keep the notification usable if a custom language omits the placeholder.
+                hint += device_name;
+            }
             display->ShowPersistentNotification(Lang::Strings::WIFI_CONFIG_MODE, true);
             display->ShowPersistentNotification(hint.c_str(), false);
             Application::GetInstance().Alert(Lang::Strings::WIFI_CONFIG_MODE, hint.c_str(),

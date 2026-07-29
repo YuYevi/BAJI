@@ -115,6 +115,7 @@ private:
     bool has_server_time_ = false;
     bool aborted_ = false;
     bool assets_version_checked_ = false;
+    bool startup_activation_completed_ = false;
     bool play_popup_on_listening_ = false;
     bool keep_ai_chat_visible_on_idle_ = false;
     std::atomic<bool> reboot_in_progress_{false};

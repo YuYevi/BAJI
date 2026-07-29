@@ -28,7 +28,7 @@ namespace Lang {
         constexpr const char* CONNECTION_SUCCESSFUL = "连接成功";
         constexpr const char* CONNECT_TO = "连接 ";
         constexpr const char* CONNECT_TO_HOTSPOT = "手机连接热点 ";
-        constexpr const char* CONNECT_WITH_BLUFI = "请打开 ESP-BLUFI，连接设备 ";
+        constexpr const char* CONNECT_WITH_BLUFI = "请打开配网应用或者小程序，通过蓝牙连接设备“%s”";
         constexpr const char* DETECTING_MODULE = "检测模组...";
         constexpr const char* DOWNLOAD_ASSETS_FAILED = "下载资源失败";
         constexpr const char* ENTERING_WIFI_CONFIG_MODE = "进入配网模式...";
