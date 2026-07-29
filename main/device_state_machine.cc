@@ -46,7 +46,8 @@ bool DeviceStateMachine::IsValidTransition(DeviceState from, DeviceState to) con
         case kDeviceStateWifiConfiguring:
             
             return to == kDeviceStateActivating ||
-                   to == kDeviceStateAudioTesting;
+                   to == kDeviceStateAudioTesting ||
+                   to == kDeviceStateIdle;
 
         case kDeviceStateAudioTesting:
             

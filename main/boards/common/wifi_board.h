@@ -18,21 +18,35 @@ protected:
     std::atomic<uint32_t> wifi_config_generation_{0};
     // Orders session changes with persistent-notification show/clear operations.
     std::mutex wifi_config_lifecycle_mutex_;
-    bool suppress_config_exit_reconnect_ = false;
+    std::atomic_bool suppress_config_exit_reconnect_{false};
     bool wifi_scan_notified_ = false;
     NetworkEventCallback network_event_callback_ = nullptr;
-    bool wifi_auto_reconnect_enabled_ = true;
+    std::atomic_bool wifi_auto_reconnect_enabled_{true};
+    std::atomic_bool blufi_audio_suspended_{false};
+    std::atomic_bool wifi_manager_initialized_{false};
+    std::mutex wifi_manager_init_mutex_;
+    std::mutex blufi_stack_lifecycle_mutex_;
 
     virtual std::string GetBoardJson() override;
 
     
     void OnNetworkEvent(NetworkEvent event, const std::string& data = "");
 
+    bool EnsureWifiManagerInitialized();
+
+    bool DeinitializeWifiManager();
+
     
     void TryWifiConnect();
 
     
     void StartWifiConfigMode(uint32_t expected_generation = 0);
+
+    void StopWifiConfigMode(bool reconnect);
+
+    bool SuspendAudioForBlufi();
+
+    void ResumeAudioAfterBlufi();
 
     void ClearManualWifiConfigMode();
 

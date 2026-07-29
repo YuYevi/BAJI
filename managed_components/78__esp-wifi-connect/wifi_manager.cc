@@ -23,16 +23,36 @@ WifiManager& WifiManager::GetInstance() {
 WifiManager::WifiManager() = default;
 
 WifiManager::~WifiManager() {
+    Deinitialize();
+}
+
+bool WifiManager::Deinitialize() {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!initialized_) {
+        return true;
+    }
+
+    ESP_LOGI(TAG, "Deinitializing...");
     if (station_active_ && station_) {
         station_->Stop();
+        station_active_ = false;
     }
     if (config_mode_active_ && config_ap_) {
         config_ap_->Stop();
+        config_mode_active_ = false;
     }
-    if (initialized_) {
-        esp_wifi_deinit();
+
+    const esp_err_t ret = esp_wifi_deinit();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "WiFi deinit failed: %s", esp_err_to_name(ret));
+        return false;
     }
+
+    station_.reset();
+    config_ap_.reset();
+    initialized_ = false;
+    ESP_LOGI(TAG, "Deinitialized");
+    return true;
 }
 
 void WifiManager::NotifyEvent(WifiEvent event, const std::string& data) {

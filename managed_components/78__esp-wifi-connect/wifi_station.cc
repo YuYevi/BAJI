@@ -227,8 +227,11 @@ void WifiStation::StartConnect() {
 
     wifi_config_t wifi_config;
     bzero(&wifi_config, sizeof(wifi_config));
-    strcpy((char *)wifi_config.sta.ssid, ap_record.ssid.c_str());
-    strcpy((char *)wifi_config.sta.password, ap_record.password.c_str());
+    const size_t ssid_len = std::min(ap_record.ssid.size(), sizeof(wifi_config.sta.ssid));
+    const size_t password_len =
+        std::min(ap_record.password.size(), sizeof(wifi_config.sta.password));
+    memcpy(wifi_config.sta.ssid, ap_record.ssid.data(), ssid_len);
+    memcpy(wifi_config.sta.password, ap_record.password.data(), password_len);
     if (remember_bssid_) {
         wifi_config.sta.channel = ap_record.channel;
         memcpy(wifi_config.sta.bssid, ap_record.bssid, 6);

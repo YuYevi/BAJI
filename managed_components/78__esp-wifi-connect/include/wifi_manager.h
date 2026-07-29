@@ -62,6 +62,7 @@ public:
     // ==================== Lifecycle ====================
     
     bool Initialize(const WifiManagerConfig& config = WifiManagerConfig{});
+    bool Deinitialize();
     bool IsInitialized() const;
 
     // ==================== Station Mode ====================

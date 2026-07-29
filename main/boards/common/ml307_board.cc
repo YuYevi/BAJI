@@ -4,6 +4,7 @@
 #include "display.h"
 
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -231,7 +232,14 @@ void Ml307Board::StartNetwork() {
     if (ok != pdPASS) {
         running_ = false;
         stop_requested_ = true;
-        ESP_LOGE("Ml307Board", "Failed to create ml307_net task");
+        ESP_LOGE("Ml307Board",
+                 "Failed to create ml307_net task: internal free=%u largest=%u, PSRAM free=%u",
+                 static_cast<unsigned>(
+                     heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(
+                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                 static_cast<unsigned>(
+                     heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
         OnNetworkEvent(NetworkEvent::ModemErrorInitFailed);
     }
 }

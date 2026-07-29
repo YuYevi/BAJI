@@ -1,6 +1,7 @@
 #ifndef AUDIO_SERVICE_H
 #define AUDIO_SERVICE_H
 
+#include <atomic>
 #include <memory>
 #include <deque>
 #include <condition_variable>
@@ -42,6 +43,12 @@
 #define AS_EVENT_WAKE_WORD_RUNNING          (1 << 1)
 #define AS_EVENT_AUDIO_PROCESSOR_RUNNING    (1 << 2)
 #define AS_EVENT_PLAYBACK_NOT_EMPTY         (1 << 3)
+#define AS_EVENT_AUDIO_INPUT_STOPPED         (1 << 4)
+#define AS_EVENT_AUDIO_OUTPUT_STOPPED        (1 << 5)
+#define AS_EVENT_OPUS_CODEC_STOPPED          (1 << 6)
+#define AS_EVENT_SERVICE_TASKS_STOPPED       (AS_EVENT_AUDIO_INPUT_STOPPED | \
+                                              AS_EVENT_AUDIO_OUTPUT_STOPPED | \
+                                              AS_EVENT_OPUS_CODEC_STOPPED)
 
 #define AS_OPUS_GET_FRAME_DRU_ENUM(duration_ms)                   \
     ((duration_ms) == 5 ? ESP_OPUS_ENC_FRAME_DURATION_5_MS :      \
@@ -101,6 +108,7 @@ public:
     void Initialize(AudioCodec* codec);
     void Start();
     void Stop();
+    bool WaitForStopped(int timeout_ms = 5000);
     void EncodeWakeWord();
     std::unique_ptr<AudioStreamPacket> PopWakeWordPacket();
     const std::string& GetLastWakeWord() const;
@@ -159,6 +167,7 @@ private:
     TaskHandle_t audio_input_task_handle_ = nullptr;
     TaskHandle_t audio_output_task_handle_ = nullptr;
     TaskHandle_t opus_codec_task_handle_ = nullptr;
+    std::mutex service_lifecycle_mutex_;
     std::mutex audio_queue_mutex_;
     std::condition_variable audio_queue_cv_;
     std::deque<std::unique_ptr<AudioStreamPacket>> audio_decode_queue_;
@@ -172,7 +181,7 @@ private:
     bool wake_word_initialized_ = false;
     bool audio_processor_initialized_ = false;
     bool voice_detected_ = false;
-    bool service_stopped_ = true;
+    std::atomic_bool service_stopped_{true};
     bool audio_input_need_warmup_ = false;
 
     esp_timer_handle_t audio_power_timer_ = nullptr;
@@ -182,6 +191,9 @@ private:
     void AudioInputTask();
     void AudioOutputTask();
     void OpusCodecTask();
+    static void AudioInputTaskEntry(void* arg);
+    static void AudioOutputTaskEntry(void* arg);
+    static void OpusCodecTaskEntry(void* arg);
     void PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm);
     void SetDecodeSampleRate(int sample_rate, int frame_duration);
     void CheckAndUpdateAudioPowerState();

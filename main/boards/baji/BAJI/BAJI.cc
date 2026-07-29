@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <string>
 #include <atomic>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -828,7 +829,8 @@ private:
                 break;
             case NetworkEvent::WifiConfigModeExit:
                 if (state == NetFlowState::WifiProvisioning) {
-                    SetNetFlowState(NetFlowState::ConnectingWifi);
+                    SetNetFlowState(data == "stopped" ? NetFlowState::Idle
+                                                       : NetFlowState::ConnectingWifi);
                 }
                 break;
             case NetworkEvent::ModemDetecting:
@@ -970,13 +972,15 @@ private:
     void StopWifiNow() {
         MqttControl::GetInstance().StopForNetworkSwitch();
         esp_timer_stop(connect_timer_);
-        ClearManualWifiConfigMode();
-        in_config_mode_ = false;
+        WifiBoard::StopWifiConfigMode(false);
         auto& wifi_manager = WifiManager::GetInstance();
-        if (wifi_manager.IsConfigMode()) {
-            wifi_manager.StopConfigAp();
-        }
         wifi_manager.StopStation();
+        if (!DeinitializeWifiManager()) {
+            ESP_LOGW(TAG, "Failed to release Wi-Fi driver before starting 4G");
+        } else {
+            // Wi-Fi tasks deleted by the driver are reclaimed by the idle task.
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
     }
 
     /**
@@ -1074,7 +1078,7 @@ private:
 
         auto* ctx = new Start4gCtx{this, for_dialog_wake};
 
-        if (xTaskCreate([](void* arg) {
+        auto task_entry = [](void* arg) {
             auto* ctx = static_cast<Start4gCtx*>(arg);
             auto self = ctx->self;
             const bool for_dialog_wake = ctx->for_dialog_wake;
@@ -1099,10 +1103,22 @@ private:
             self->fourg_boot_task_ = nullptr;
 
             vTaskDelete(nullptr);
-        }, "baji185_4g_start", 8192, ctx, 5, &fourg_boot_task_) != pdPASS) {
+        };
+
+        const BaseType_t task_created =
+            xTaskCreate(task_entry, "baji185_4g_start", 8192, ctx, 5, &fourg_boot_task_);
+        if (task_created != pdPASS) {
             delete ctx;
             fourg_boot_task_ = nullptr;
             SetNetFlowState(NetFlowState::Idle);
+            ESP_LOGE(TAG,
+                     "Failed to create 4G boot task: internal free=%u largest=%u, PSRAM free=%u",
+                     static_cast<unsigned>(
+                         heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                     static_cast<unsigned>(heap_caps_get_largest_free_block(
+                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                     static_cast<unsigned>(
+                         heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
         }
     }
 
@@ -1240,6 +1256,9 @@ private:
     }
 
     void TriggerWifiReprovision() {
+        if (IsInWifiConfigMode() && !IsManualWifiConfigMode()) {
+            EnterWifiConfigMode();
+        }
         if (IsManualWifiConfigMode() && ExitManualWifiConfigMode()) {
             GetDisplay()->ShowNotification("退出配网模式", 2000);
             return;
