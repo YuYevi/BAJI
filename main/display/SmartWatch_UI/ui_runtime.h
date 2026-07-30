@@ -43,6 +43,10 @@ bool smartwatch_ui_runtime_is_sound_idle(void);
 void smartwatch_ui_runtime_play_alarm_sound(void);
 void smartwatch_ui_runtime_stop_sound(void);
 bool smartwatch_ui_runtime_get_asset(const char * name, const uint8_t ** data, size_t * size);
+bool smartwatch_ui_runtime_get_remote_ai_chat_mjpeg(bool speaking, const uint8_t ** data,
+                                                     size_t * size);
+void smartwatch_ui_runtime_reset_remote_ai_chat_mjpeg_cache(void);
+void smartwatch_ui_runtime_reload_ai_chat_mjpeg(void);
 
 void smartwatch_ui_runtime_wallpaper_set_visible(bool visible);
 void smartwatch_ui_runtime_wallpaper_set_static(const lv_image_dsc_t * image);

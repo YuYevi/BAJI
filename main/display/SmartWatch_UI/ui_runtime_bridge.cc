@@ -3,6 +3,7 @@
 #include "application.h"
 #include "assets.h"
 #include "assets/lang_config.h"
+#include "remote_mjpeg_store.h"
 #include "remote_wallpaper_store.h"
 #include "screens/ui_StandbyScreen.h"
 #include "screens/ui_WallpaperScreen.h"
@@ -39,6 +40,53 @@ static uint8_t g_wallpaper_preview_last_mode = 0;
 static bool g_wallpaper_remote_preview_loaded = false;
 static lv_timer_t * g_wallpaper_standby_refresh_timer = NULL;
 static bool g_wallpaper_standby_refresh_pending = false;
+static uint8_t * g_remote_ai_chat_mjpeg[2] = {nullptr, nullptr};
+static size_t g_remote_ai_chat_mjpeg_size[2] = {0, 0};
+static bool g_remote_ai_chat_mjpeg_checked = false;
+
+static void smartwatch_ui_runtime_release_remote_ai_chat_mjpeg_cache(void)
+{
+    for (uint8_t i = 0; i < 2; ++i) {
+        if (g_remote_ai_chat_mjpeg[i] != nullptr) {
+            heap_caps_free(g_remote_ai_chat_mjpeg[i]);
+            g_remote_ai_chat_mjpeg[i] = nullptr;
+        }
+        g_remote_ai_chat_mjpeg_size[i] = 0;
+    }
+}
+
+static void smartwatch_ui_runtime_ensure_remote_ai_chat_mjpeg_cache(void)
+{
+    if (g_remote_ai_chat_mjpeg_checked) {
+        return;
+    }
+    g_remote_ai_chat_mjpeg_checked = true;
+
+    auto& store = RemoteMjpegStore::GetInstance();
+    if (!store.Reload()) {
+        return;
+    }
+
+    uint8_t * listening = nullptr;
+    uint8_t * speaking = nullptr;
+    size_t listening_size = 0;
+    size_t speaking_size = 0;
+    if (!store.Load(false, &listening, &listening_size) ||
+        !store.Load(true, &speaking, &speaking_size)) {
+        if (listening != nullptr) {
+            heap_caps_free(listening);
+        }
+        if (speaking != nullptr) {
+            heap_caps_free(speaking);
+        }
+        return;
+    }
+
+    g_remote_ai_chat_mjpeg[0] = listening;
+    g_remote_ai_chat_mjpeg_size[0] = listening_size;
+    g_remote_ai_chat_mjpeg[1] = speaking;
+    g_remote_ai_chat_mjpeg_size[1] = speaking_size;
+}
 
 static void smartwatch_ui_runtime_wallpaper_standby_refresh_timer_cb(lv_timer_t * timer)
 {
@@ -302,6 +350,31 @@ extern "C" bool smartwatch_ui_runtime_get_asset(const char * name, const uint8_t
     *data = static_cast<const uint8_t*>(ptr);
     *size = asset_size;
     return true;
+}
+
+extern "C" bool smartwatch_ui_runtime_get_remote_ai_chat_mjpeg(bool speaking,
+                                                                  const uint8_t ** data,
+                                                                  size_t * size)
+{
+    if (data == nullptr || size == nullptr) {
+        return false;
+    }
+
+    smartwatch_ui_runtime_ensure_remote_ai_chat_mjpeg_cache();
+    const uint8_t index = speaking ? 1 : 0;
+    if (g_remote_ai_chat_mjpeg[index] == nullptr || g_remote_ai_chat_mjpeg_size[index] == 0) {
+        return false;
+    }
+
+    *data = g_remote_ai_chat_mjpeg[index];
+    *size = g_remote_ai_chat_mjpeg_size[index];
+    return true;
+}
+
+extern "C" void smartwatch_ui_runtime_reset_remote_ai_chat_mjpeg_cache(void)
+{
+    smartwatch_ui_runtime_release_remote_ai_chat_mjpeg_cache();
+    g_remote_ai_chat_mjpeg_checked = false;
 }
 
 extern "C" void smartwatch_ui_runtime_wallpaper_set_visible(bool visible)

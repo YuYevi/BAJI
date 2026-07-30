@@ -1,5 +1,7 @@
 #include "remote_wallpaper_store.h"
 
+#include "remote_asset_regions.h"
+
 #include "display/lvgl_display/jpg/jpeg_to_image.h"
 #include "display/lvgl_display/lvgl_image.h"
 
@@ -17,7 +19,6 @@ constexpr const char* kTag = "RemoteWallpaper";
 constexpr uint32_t kMagic = 0x31505752;  // "RWP1"
 constexpr uint16_t kLegacyVersion = 1;
 constexpr uint16_t kVersion = 2;
-constexpr uint32_t kRegionOffset = 8 * 1024 * 1024;
 constexpr uint32_t kDefaultIntervalMs = 2000;
 
 struct StoredHeaderPrefix {
@@ -148,14 +149,14 @@ bool RemoteWallpaperStore::EnsurePartition() {
         return false;
     }
 
-    if (partition_->size <= kRegionOffset) {
-        ESP_LOGW(kTag, "Assets partition size %u leaves no room for remote wallpapers",
+    if (partition_->size < RemoteAssetRegions::kRequiredAssetsPartitionSize) {
+        ESP_LOGW(kTag, "Assets partition size %u does not support the wallpaper region",
                  static_cast<unsigned>(partition_->size));
         return false;
     }
 
-    region_offset_ = kRegionOffset;
-    region_size_ = partition_->size - region_offset_;
+    region_offset_ = RemoteAssetRegions::kWallpaperOffset;
+    region_size_ = RemoteAssetRegions::kWallpaperSize;
     if (SlotSize() < (sizeof(StoredHeader) + 1024)) {
         ESP_LOGW(kTag, "Reserved flash region is too small for dual slot wallpapers");
         return false;

@@ -334,6 +334,24 @@ void ui_AIChatScreen_set_emotion(const char * emotion)
     chat_refresh_emotion();
 }
 
+void ui_AIChatScreen_reload_mjpeg(void)
+{
+    if(chat_mjpeg_player) {
+        smartwatch_ui_runtime_mjpeg_player_destroy(chat_mjpeg_player);
+        chat_mjpeg_player = NULL;
+    }
+    if(chat_mjpeg_bg) {
+        lv_obj_delete(chat_mjpeg_bg);
+        chat_mjpeg_bg = NULL;
+    }
+
+    smartwatch_ui_runtime_reset_remote_ai_chat_mjpeg_cache();
+    g_chat_mjpeg_is_speaking = false;
+    if(ui_AIChatScreen) {
+        chat_create_mjpeg_bg();
+    }
+}
+
 /**
  * @brief 反初始化AI聊天屏幕
  */

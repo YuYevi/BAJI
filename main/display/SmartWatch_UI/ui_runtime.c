@@ -128,6 +128,7 @@ void smartwatch_ui_runtime_deinit(void)
 
     smartwatch_ui_runtime_wallpaper_reset();
     ui_destroy();
+    smartwatch_ui_runtime_reset_remote_ai_chat_mjpeg_cache();
     g_runtime_inited = false;
 }
 
@@ -209,6 +210,12 @@ void smartwatch_ui_runtime_show_ai_chat(void)
 
     smartwatch_ui_runtime_wallpaper_set_visible(false);
     ui_nav_push(&ui_AIChatScreen, LV_SCR_LOAD_ANIM_NONE, 0, 0);
+}
+
+void smartwatch_ui_runtime_reload_ai_chat_mjpeg(void)
+{
+    if(!g_runtime_inited) return;
+    ui_AIChatScreen_reload_mjpeg();
 }
 
 void smartwatch_ui_runtime_show_wallpaper(void)

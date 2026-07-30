@@ -14,6 +14,7 @@
 #include "lvgl_theme.h"
 #include "emote_display.h"
 #include "expression_emote.h"
+#include "remote_asset_regions.h"
 
 #if HAVE_LVGL
 #include "display/lcd_display.h"
@@ -277,9 +278,13 @@ bool Assets::LvglStrategy::InitializePartition(Assets* assets) {
     uint32_t stored_len = *(uint32_t*)(mmap_root_ + 8);     // 数据长度
 
     // 验证数据长度有效性
-    if (stored_len > assets->partition_->size - 12) {
-        ESP_LOGD(TAG, "Invalid stored_len (0x%lx) exceeds partition size (0x%lx)", 
-                 stored_len, assets->partition_->size);
+    const uint32_t system_region_size =
+        assets->partition_->size < RemoteAssetRegions::kSystemSize
+            ? assets->partition_->size
+            : RemoteAssetRegions::kSystemSize;
+    if (system_region_size < 12 || stored_len > system_region_size - 12) {
+        ESP_LOGD(TAG, "Invalid stored_len (0x%lx) exceeds system asset region (0x%lx)",
+                 stored_len, system_region_size);
         return false;
     }
 
@@ -692,8 +697,13 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
     }
 
     // 验证内容大小是否在分区范围内
-    if (content_length > partition_->size) {
-        ESP_LOGE(TAG, "Content size %u exceeds partition size %u", content_length, partition_->size);
+    const size_t system_region_size =
+        partition_->size < RemoteAssetRegions::kSystemSize
+            ? partition_->size
+            : RemoteAssetRegions::kSystemSize;
+    if (content_length > system_region_size) {
+        ESP_LOGE(TAG, "Content size %u exceeds system asset region %u", content_length,
+                 system_region_size);
         return false;
     }
 
@@ -737,8 +747,8 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
             size_t sector_end = (current_sector + 1) * SECTOR_SIZE;
             
             // 检查扇区是否超出分区范围
-            if (sector_end > partition_->size) {
-                ESP_LOGE(TAG, "Sector %u exceeds partition size", current_sector);
+            if (sector_end > system_region_size) {
+                ESP_LOGE(TAG, "Sector %u exceeds system asset region", current_sector);
                 heap_caps_free(buffer);
                 return false;
             }

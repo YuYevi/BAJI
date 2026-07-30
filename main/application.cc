@@ -23,11 +23,14 @@
 #if HAVE_LVGL
 #include "lcd_display.h"
 #include "lvgl_image.h"
+#include "remote_asset_regions.h"
+#include "remote_mjpeg_store.h"
 #include "remote_wallpaper_store.h"
 #include "display/SmartWatch_UI/ui_runtime.h"
 #include <esp_heap_caps.h>
 #endif
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <esp_log.h>
@@ -56,6 +59,7 @@ static constexpr uint32_t kRebootFinalizeDelayMs = 550;
 static constexpr uint32_t kRebootNotificationMs = 1600;
 static constexpr uint32_t kRebootAudioShutdownDelayMs = 100;
 static std::atomic<bool> g_skin_download_in_progress{false};
+static std::atomic<bool> g_role_download_in_progress{false};
 static std::atomic<uint32_t> g_skin_notification_generation{0};
 static std::atomic<bool> g_unbind_rebind_in_progress{false};
 static std::atomic<bool> g_rebind_waiting_in_progress{false};
@@ -254,6 +258,17 @@ struct SkinUpdateTaskPayload {
     SkinMaterialParseResult parsed;
 };
 
+struct RoleSwitchParseResult {
+    std::string role_id;
+    std::string listen_mjpeg_url;
+    std::string speak_mjpeg_url;
+};
+
+struct RoleSwitchTaskPayload {
+    Application* app = nullptr;
+    RoleSwitchParseResult parsed;
+};
+
 struct DownloadedWallpaperData {
     uint8_t* data = nullptr;
     size_t size = 0;
@@ -384,11 +399,37 @@ static bool ParseSkinUpdateParams(cJSON* params, SkinMaterialParseResult* out) {
     return out->ok;
 }
 
-static bool DownloadImageToPsram(const char* url, uint8_t** out_data, size_t* out_len) {
+static bool ParseRoleSwitchParams(cJSON* params, RoleSwitchParseResult* out) {
+    if (!cJSON_IsObject(params) || out == nullptr) {
+        return false;
+    }
+
+    cJSON* role_id = cJSON_GetObjectItem(params, "roleId");
+    cJSON* listen_url = cJSON_GetObjectItem(params, "listenMjpegUrl");
+    cJSON* speak_url = cJSON_GetObjectItem(params, "speakMjpegUrl");
+    if (!cJSON_IsString(role_id) || role_id->valuestring == nullptr ||
+        !cJSON_IsString(listen_url) || listen_url->valuestring == nullptr ||
+        !cJSON_IsString(speak_url) || speak_url->valuestring == nullptr) {
+        return false;
+    }
+
+    out->role_id = TrimAsciiWhitespace(role_id->valuestring);
+    out->listen_mjpeg_url = TrimAsciiWhitespace(listen_url->valuestring);
+    out->speak_mjpeg_url = TrimAsciiWhitespace(speak_url->valuestring);
+    return out->role_id.size() < 64 && !out->listen_mjpeg_url.empty() &&
+           !out->speak_mjpeg_url.empty();
+}
+
+static bool DownloadFileToPsram(const char* url, size_t max_size, uint8_t** out_data,
+                                size_t* out_len) {
     constexpr int kMaxRetries = 3;
     constexpr size_t kChunkSize = 4096;
     *out_data = nullptr;
     *out_len = 0;
+
+    if (url == nullptr || url[0] == '\0' || max_size == 0) {
+        return false;
+    }
 
     for (int attempt = 1; attempt <= kMaxRetries; ++attempt) {
         auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
@@ -409,6 +450,12 @@ static bool DownloadImageToPsram(const char* url, uint8_t** out_data, size_t* ou
         bool ok = true;
 
         if (content_length > 0) {
+            if (content_length > max_size) {
+                ESP_LOGW(TAG, "Download size %u exceeds limit %u", static_cast<unsigned>(content_length),
+                         static_cast<unsigned>(max_size));
+                http->Close();
+                return false;
+            }
             data = reinterpret_cast<uint8_t*>(
                 heap_caps_malloc(content_length, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
             if (data == nullptr) {
@@ -433,7 +480,7 @@ static bool DownloadImageToPsram(const char* url, uint8_t** out_data, size_t* ou
                 ok = false;
             }
         } else {
-            size_t capacity = kChunkSize * 2;
+            size_t capacity = std::min(kChunkSize * 2, max_size);
             data = reinterpret_cast<uint8_t*>(
                 heap_caps_malloc(capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
             if (data == nullptr) {
@@ -443,8 +490,16 @@ static bool DownloadImageToPsram(const char* url, uint8_t** out_data, size_t* ou
             }
 
             while (true) {
-                if (capacity - total_read < kChunkSize) {
-                    size_t new_capacity = capacity * 2;
+                if (total_read == max_size) {
+                    uint8_t overflow_byte = 0;
+                    if (http->Read(reinterpret_cast<char*>(&overflow_byte), 1) != 0) {
+                        ok = false;
+                    }
+                    break;
+                }
+
+                if (capacity - total_read < kChunkSize && capacity < max_size) {
+                    size_t new_capacity = std::min(capacity * 2, max_size);
                     uint8_t* grown = reinterpret_cast<uint8_t*>(
                         heap_caps_realloc(data, new_capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
                     if (grown == nullptr) {
@@ -455,7 +510,8 @@ static bool DownloadImageToPsram(const char* url, uint8_t** out_data, size_t* ou
                     capacity = new_capacity;
                 }
 
-                int ret = http->Read(reinterpret_cast<char*>(data + total_read), kChunkSize);
+                const size_t read_size = std::min(kChunkSize, capacity - total_read);
+                int ret = http->Read(reinterpret_cast<char*>(data + total_read), read_size);
                 if (ret < 0) {
                     ok = false;
                     break;
@@ -554,7 +610,8 @@ static void DownloadServerBackgroundTask(void* arg) {
         const auto& url = payload->parsed.urls[i];
         uint8_t* compressed_data = nullptr;
         size_t compressed_len = 0;
-        if (DownloadImageToPsram(url.c_str(), &compressed_data, &compressed_len)) {
+        if (DownloadFileToPsram(url.c_str(), RemoteAssetRegions::kWallpaperSize / 2,
+                                 &compressed_data, &compressed_len)) {
             downloaded_wallpapers.push_back({compressed_data, compressed_len});
         }
     }
@@ -622,6 +679,58 @@ static void DownloadServerBackgroundTask(void* arg) {
     schedule_notification(final_gen, "下载完成", kSkinSyncToastCompletedMs);
     cleanup_and_exit();
     return;
+}
+
+static void DownloadRoleMjpegTask(void* arg) {
+    std::unique_ptr<RoleSwitchTaskPayload> payload(static_cast<RoleSwitchTaskPayload*>(arg));
+    DownloadedWallpaperData listen_mjpeg;
+    DownloadedWallpaperData speak_mjpeg;
+
+    auto cleanup = [&]() {
+        if (listen_mjpeg.data != nullptr) {
+            heap_caps_free(listen_mjpeg.data);
+        }
+        if (speak_mjpeg.data != nullptr) {
+            heap_caps_free(speak_mjpeg.data);
+        }
+        payload.reset();
+        g_role_download_in_progress.store(false);
+    };
+
+    bool downloaded = payload != nullptr && payload->app != nullptr &&
+                      DownloadFileToPsram(payload->parsed.listen_mjpeg_url.c_str(),
+                                          RemoteAssetRegions::kMjpegSize, &listen_mjpeg.data,
+                                          &listen_mjpeg.size) &&
+                      DownloadFileToPsram(payload->parsed.speak_mjpeg_url.c_str(),
+                                          RemoteAssetRegions::kMjpegSize, &speak_mjpeg.data,
+                                          &speak_mjpeg.size);
+    if (!downloaded) {
+        ESP_LOGW(TAG, "Failed to download role MJPEG files");
+        cleanup();
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    if (!RemoteMjpegStore::GetInstance().Save(
+            payload->parsed.role_id, listen_mjpeg.data, listen_mjpeg.size, speak_mjpeg.data,
+            speak_mjpeg.size)) {
+        ESP_LOGW(TAG, "Failed to persist role MJPEG files");
+        cleanup();
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    payload->app->Schedule([]() {
+        auto* display = Board::GetInstance().GetDisplay();
+        if (display != nullptr) {
+            DisplayLockGuard lock(display);
+            smartwatch_ui_runtime_reload_ai_chat_mjpeg();
+        }
+    });
+    ESP_LOGI(TAG, "Role MJPEG files updated for role '%s'", payload->parsed.role_id.c_str());
+
+    cleanup();
+    vTaskDelete(nullptr);
 }
 #endif
 
@@ -2087,7 +2196,34 @@ void Application::HandleMqttCommand(const char* json, int len) {
         reason = "skin_update_not_supported";
 #endif
     } else if (strcmp(method->valuestring, "switch_role") == 0) {
+#if HAVE_LVGL
+        RoleSwitchParseResult parsed;
+        if (!ParseRoleSwitchParams(params, &parsed)) {
+            reason = "invalid_switch_role";
+        } else {
+            bool expected = false;
+            if (!g_role_download_in_progress.compare_exchange_strong(expected, true)) {
+                reason = "switch_role_in_progress";
+            } else {
+                auto* payload = new RoleSwitchTaskPayload();
+                payload->app = this;
+                payload->parsed = std::move(parsed);
+                if (xTaskCreate(
+                        [](void* arg) {
+                            DownloadRoleMjpegTask(arg);
+                        },
+                        "mqtt_role", 8192, payload, 5, nullptr) != pdPASS) {
+                    delete payload;
+                    g_role_download_in_progress.store(false);
+                    reason = "switch_role_task_create_failed";
+                } else {
+                    success = true;
+                }
+            }
+        }
+#else
         reason = "switch_role_not_supported";
+#endif
     }
 
     // 发送指令应答 (Ack)

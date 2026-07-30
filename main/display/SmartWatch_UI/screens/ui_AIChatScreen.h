@@ -20,6 +20,7 @@ void ui_AIChatScreen_set_status(const char * status);
 void ui_AIChatScreen_set_chat_message(const char * role, const char * content);
 void ui_AIChatScreen_clear_messages(void);
 void ui_AIChatScreen_set_emotion(const char * emotion);
+void ui_AIChatScreen_reload_mjpeg(void);
 
 #ifdef __cplusplus
 }

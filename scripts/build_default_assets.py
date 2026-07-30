@@ -24,6 +24,8 @@ SKIP_DEFAULT_EXTRA_FILES = {
     "NoSpeak.gif",
 }
 
+SYSTEM_ASSETS_REGION_SIZE = 6 * 1024 * 1024
+
 
 # =============================================================================
 # Pack model functions (from pack_model.py)
@@ -357,7 +359,7 @@ def generate_config_json(build_dir, assets_dir):
         "assets_path": assets_dir,
         "image_file": os.path.join(build_dir, "output", "assets.bin"),
         "lvgl_ver": "9.3.0",
-        "assets_size": "0x400000",
+        "assets_size": hex(SYSTEM_ASSETS_REGION_SIZE),
         "support_format": ".png, .gif, .jpg, .bin, .json",
         "name_length": "32",
         "split_height": "0",
@@ -444,6 +446,12 @@ def pack_assets_simple(target_path, include_path, out_file, assets_path, max_nam
     combined_data_length = len(combined_data).to_bytes(4, byteorder='little')
     header_data = total_files.to_bytes(4, byteorder='little') + combined_checksum.to_bytes(4, byteorder='little')
     final_data = header_data + combined_data_length + combined_data
+
+    if len(final_data) > SYSTEM_ASSETS_REGION_SIZE:
+        raise ValueError(
+            f"Default assets size {len(final_data)} exceeds the "
+            f"{SYSTEM_ASSETS_REGION_SIZE}-byte system asset region"
+        )
 
     with open(out_file, 'wb') as output_bin:
         output_bin.write(final_data)

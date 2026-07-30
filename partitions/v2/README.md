@@ -72,7 +72,10 @@ The `assets` partition stores:
 - `phy_init`: 4KB
 - `ota_0`: 4MB
 - `ota_1`: 4MB
-- `assets`: 16MB
+- `assets`: 16MB, logically divided into:
+  - 6MB firmware/system assets
+  - 5MB downloaded JPG wallpapers
+  - 5MB downloaded AI chat MJPEG files
 
 ## Benefits
 
@@ -90,6 +93,8 @@ The `assets` partition stores:
 - **Checksum Validation**: Built-in integrity checking ensures asset data validity
 - **Progressive Download**: Assets can be downloaded progressively with progress tracking
 - **Fallback Support**: Graceful fallback to default assets if network updates fail
+- **Persistent Remote Media**: Downloaded JPG and MJPEG regions survive reboot and are only
+  replaced after a complete new download is ready
 
 ## Migration from v1
 
@@ -104,4 +109,4 @@ When upgrading from v1 to v2:
 - The `assets` partition size varies by configuration to optimize for different flash sizes
 - ESP32-C3 devices use a smaller assets partition (4MB) due to limited available mmap pages in the system
 - 32MB devices get the largest assets partition (16MB) for maximum content storage
-- All partition tables maintain proper alignment for optimal flash performance 
+- All partition tables maintain proper alignment for optimal flash performance

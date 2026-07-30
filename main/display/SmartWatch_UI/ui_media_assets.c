@@ -180,10 +180,16 @@ void ui_media_assets_release_all_wallpaper_jpgs(void)
 
 bool ui_media_assets_get_ai_chat_speaking_mjpeg(const uint8_t ** data, size_t * size)
 {
+    if(smartwatch_ui_runtime_get_remote_ai_chat_mjpeg(true, data, size)) {
+        return true;
+    }
     return ui_media_assets_get_raw_asset(&s_ai_chat_speaking_mjpeg_asset, data, size);
 }
 
 bool ui_media_assets_get_ai_chat_idle_mjpeg(const uint8_t ** data, size_t * size)
 {
+    if(smartwatch_ui_runtime_get_remote_ai_chat_mjpeg(false, data, size)) {
+        return true;
+    }
     return ui_media_assets_get_raw_asset(&s_ai_chat_idle_mjpeg_asset, data, size);
 }
