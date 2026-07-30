@@ -387,10 +387,9 @@ void WifiBoard::StartWifiConfigMode(uint32_t expected_generation) {
         suppress_config_exit_reconnect_.store(!reconnect_saved_wifi);
         OnNetworkEvent(NetworkEvent::WifiConfigModeExit,
                        reconnect_saved_wifi ? "reconnect" : "stopped");
-        Application::GetInstance().Schedule([this, ret, reconnect_saved_wifi]() {
+        Application::GetInstance().Schedule([this, ret]() {
             auto& app = Application::GetInstance();
-            if (!reconnect_saved_wifi &&
-                app.GetDeviceState() == kDeviceStateWifiConfiguring) {
+            if (app.GetDeviceState() == kDeviceStateWifiConfiguring) {
                 app.SetDeviceState(kDeviceStateIdle);
             }
             ResumeAudioAfterBlufi();
@@ -513,9 +512,9 @@ void WifiBoard::StopWifiConfigMode(bool reconnect) {
         ESP_LOGE(TAG, "Failed to stop BLUFI: %s", esp_err_to_name(ret));
     }
     OnNetworkEvent(NetworkEvent::WifiConfigModeExit, reconnect ? "reconnect" : "stopped");
-    Application::GetInstance().Schedule([this, reconnect]() {
+    Application::GetInstance().Schedule([this]() {
         auto& app = Application::GetInstance();
-        if (!reconnect && app.GetDeviceState() == kDeviceStateWifiConfiguring) {
+        if (app.GetDeviceState() == kDeviceStateWifiConfiguring) {
             app.SetDeviceState(kDeviceStateIdle);
         }
         ResumeAudioAfterBlufi();
@@ -582,7 +581,7 @@ void WifiBoard::EnterWifiConfigMode() {
             suppress_config_exit_reconnect_.store(!have_saved_wifi);
             OnNetworkEvent(NetworkEvent::WifiConfigModeExit,
                            have_saved_wifi ? "reconnect" : "stopped");
-            if (!have_saved_wifi && app.GetDeviceState() == kDeviceStateWifiConfiguring) {
+            if (app.GetDeviceState() == kDeviceStateWifiConfiguring) {
                 app.SetDeviceState(kDeviceStateIdle);
             }
         }
@@ -615,9 +614,9 @@ bool WifiBoard::ExitManualWifiConfigMode() {
         suppress_config_exit_reconnect_.store(!have_saved_wifi);
         OnNetworkEvent(NetworkEvent::WifiConfigModeExit,
                        have_saved_wifi ? "reconnect" : "stopped");
-        Application::GetInstance().Schedule([this, have_saved_wifi]() {
+        Application::GetInstance().Schedule([this]() {
             auto& app = Application::GetInstance();
-            if (!have_saved_wifi && app.GetDeviceState() == kDeviceStateWifiConfiguring) {
+            if (app.GetDeviceState() == kDeviceStateWifiConfiguring) {
                 app.SetDeviceState(kDeviceStateIdle);
             }
             ResumeAudioAfterBlufi();
