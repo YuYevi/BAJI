@@ -5,6 +5,7 @@
 #include <esp_app_desc.h>
 #include <algorithm>
 #include <cstring>
+#include <memory>
 #include <esp_pthread.h>
 
 #include "application.h"
@@ -252,9 +253,17 @@ void McpServer::AddUserOnlyTools() {
                 
                 std::string boundary = "----ESP32_SCREEN_SNAPSHOT_BOUNDARY";
                 
-                auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
+                auto network = Board::GetInstance().GetNetwork();
+                if (network == nullptr) {
+                    throw std::runtime_error("Network is not ready");
+                }
+                auto http = network->CreateHttp(3);
+                if (http == nullptr) {
+                    throw std::runtime_error("Failed to create HTTP client");
+                }
                 http->SetHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
                 if (!http->Open("POST", url)) {
+                    http->Close();
                     throw std::runtime_error("Failed to open URL: " + url);
                 }
                 {
@@ -279,6 +288,7 @@ void McpServer::AddUserOnlyTools() {
                 http->Write("", 0);
 
                 if (http->GetStatusCode() != 200) {
+                    http->Close();
                     throw std::runtime_error("Unexpected status code: " + std::to_string(http->GetStatusCode()));
                 }
                 std::string result = http->ReadAll();
@@ -293,36 +303,57 @@ void McpServer::AddUserOnlyTools() {
             }),
             [display](const PropertyList& properties) -> ReturnValue {
                 auto url = properties["url"].value<std::string>();
-                auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
+                auto network = Board::GetInstance().GetNetwork();
+                if (network == nullptr) {
+                    throw std::runtime_error("Network is not ready");
+                }
+                auto http = network->CreateHttp(3);
+                if (http == nullptr) {
+                    throw std::runtime_error("Failed to create HTTP client");
+                }
 
                 if (!http->Open("GET", url)) {
+                    http->Close();
                     throw std::runtime_error("Failed to open URL: " + url);
                 }
                 int status_code = http->GetStatusCode();
                 if (status_code != 200) {
+                    http->Close();
                     throw std::runtime_error("Unexpected status code: " + std::to_string(status_code));
                 }
 
                 size_t content_length = http->GetBodyLength();
-                char* data = (char*)heap_caps_malloc(content_length, MALLOC_CAP_8BIT);
+                if (content_length == 0) {
+                    http->Close();
+                    throw std::runtime_error("Empty image response: " + url);
+                }
+                std::unique_ptr<uint8_t, decltype(&heap_caps_free)> data(
+                    static_cast<uint8_t*>(heap_caps_malloc(content_length, MALLOC_CAP_8BIT)),
+                    heap_caps_free);
                 if (data == nullptr) {
+                    http->Close();
                     throw std::runtime_error("Failed to allocate memory for image: " + url);
                 }
                 size_t total_read = 0;
                 while (total_read < content_length) {
-                    int ret = http->Read(data + total_read, content_length - total_read);
+                    int ret = http->Read(reinterpret_cast<char*>(data.get() + total_read),
+                                         content_length - total_read);
                     if (ret < 0) {
-                        heap_caps_free(data);
+                        http->Close();
                         throw std::runtime_error("Failed to download image: " + url);
                     }
                     if (ret == 0) {
                         break;
                     }
-                    total_read += ret;
+                    total_read += static_cast<size_t>(ret);
                 }
                 http->Close();
+                if (total_read != content_length) {
+                    throw std::runtime_error("Incomplete image download: " + url);
+                }
 
-                auto image = std::make_unique<LvglAllocatedImage>(data, content_length);
+                auto image = std::make_unique<LvglAllocatedImage>(data.get(), content_length);
+                data.release();
                 display->SetPreviewImage(std::move(image));
                 return true;
             });

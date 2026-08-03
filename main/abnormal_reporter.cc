@@ -106,6 +106,10 @@ void QueueEventInternal(Settings& settings, const char* type, const char* json) 
     }
 
     cJSON* event = cJSON_CreateObject();
+    if (event == nullptr) {
+        cJSON_Delete(events);
+        return;
+    }
     cJSON_AddStringToObject(event, "type", type);
     cJSON* parsed = cJSON_Parse(json);
     if (parsed != nullptr) {
@@ -131,18 +135,20 @@ void Initialize() {
 
     if (ShouldReportReset(previous_shutdown_clean, reset_reason)) {
         cJSON* root = cJSON_CreateObject();
-        cJSON_AddStringToObject(root, "resetReason", ResetReasonToString(reset_reason));
-        cJSON_AddBoolToObject(root, "previousShutdownClean", previous_shutdown_clean);
-        if (!expected_reset.empty()) {
-            cJSON_AddStringToObject(root, "expectedReset", expected_reset.c_str());
-        }
+        if (root != nullptr) {
+            cJSON_AddStringToObject(root, "resetReason", ResetReasonToString(reset_reason));
+            cJSON_AddBoolToObject(root, "previousShutdownClean", previous_shutdown_clean);
+            if (!expected_reset.empty()) {
+                cJSON_AddStringToObject(root, "expectedReset", expected_reset.c_str());
+            }
 
-        char* json = cJSON_PrintUnformatted(root);
-        if (json != nullptr) {
-            QueueEventInternal(settings, "abnormal_reset", json);
-            cJSON_free(json);
+            char* json = cJSON_PrintUnformatted(root);
+            if (json != nullptr) {
+                QueueEventInternal(settings, "abnormal_reset", json);
+                cJSON_free(json);
+            }
+            cJSON_Delete(root);
         }
-        cJSON_Delete(root);
     }
 
     settings.SetBool(kCleanShutdownKey, false);
@@ -177,6 +183,10 @@ void PublishPendingEvents() {
     }
 
     cJSON* remaining = cJSON_CreateArray();
+    if (remaining == nullptr) {
+        cJSON_Delete(events);
+        return;
+    }
     bool publish_blocked = false;
     const int event_count = cJSON_GetArraySize(events);
     for (int i = 0; i < event_count; ++i) {
@@ -186,7 +196,10 @@ void PublishPendingEvents() {
         }
 
         if (publish_blocked) {
-            cJSON_AddItemToArray(remaining, cJSON_Duplicate(item, true));
+            cJSON* duplicate = cJSON_Duplicate(item, true);
+            if (duplicate != nullptr) {
+                cJSON_AddItemToArray(remaining, duplicate);
+            }
             continue;
         }
 
@@ -209,7 +222,10 @@ void PublishPendingEvents() {
 
         if (!mqtt_control.ReportEvent(type->valuestring, payload)) {
             publish_blocked = true;
-            cJSON_AddItemToArray(remaining, cJSON_Duplicate(item, true));
+            cJSON* duplicate = cJSON_Duplicate(item, true);
+            if (duplicate != nullptr) {
+                cJSON_AddItemToArray(remaining, duplicate);
+            }
         }
         cJSON_free(payload);
     }

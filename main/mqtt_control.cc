@@ -101,9 +101,18 @@ bool RefreshToken() {
 
     // 构建认证请求
     cJSON* req = cJSON_CreateObject();
+    if (req == nullptr) {
+        ESP_LOGE(TAG_CTRL, "Failed to allocate auth request JSON");
+        return false;
+    }
     cJSON_AddStringToObject(req, "deviceId", device_id.c_str());
     char* req_str = cJSON_PrintUnformatted(req);
-    std::string body = req_str != nullptr ? req_str : "";
+    if (req_str == nullptr) {
+        ESP_LOGE(TAG_CTRL, "Failed to serialize auth request JSON");
+        cJSON_Delete(req);
+        return false;
+    }
+    std::string body = req_str;
     cJSON_free(req_str);
     cJSON_Delete(req);
 
@@ -765,7 +774,8 @@ void MqttControl::TokenRefreshTimerCallback(void* arg) {
 
 // 调度 Token 刷新检查任务
 void MqttControl::ScheduleTokenRefreshCheck() {
-    if (client_ == nullptr || refresh_task_running_.exchange(true)) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (backend_ == Backend::NONE || refresh_task_running_.exchange(true)) {
         return;
     }
 
@@ -788,9 +798,21 @@ void MqttControl::RefreshTokenIfNeeded() {
         return;
     }
 
+    Backend backend_snapshot;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        backend_snapshot = backend_;
+        if (backend_snapshot == Backend::NONE) {
+            return;
+        }
+    }
+
     ESP_LOGW(TAG_CTRL, "Token is expiring, refreshing...");
     if (RefreshToken()) {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (backend_ != backend_snapshot || backend_ == Backend::NONE) {
+            return;
+        }
         StopLocked(false);
         StartLocked();
     }

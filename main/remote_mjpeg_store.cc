@@ -94,10 +94,12 @@ void RemoteMjpegStore::ResetMetadata() {
 }
 
 bool RemoteMjpegStore::IsSupported() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     return EnsurePartition();
 }
 
 bool RemoteMjpegStore::Reload() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!EnsurePartition()) {
         ResetMetadata();
         return false;
@@ -141,6 +143,7 @@ bool RemoteMjpegStore::Reload() {
 
 bool RemoteMjpegStore::Save(const std::string& role_id, const uint8_t* listen_data,
                             size_t listen_size, const uint8_t* speak_data, size_t speak_size) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!EnsurePartition() || role_id.size() >= sizeof(StoredHeader::role_id) ||
         listen_data == nullptr || speak_data == nullptr || listen_size == 0 || speak_size == 0 ||
         listen_size > std::numeric_limits<uint32_t>::max() ||
@@ -207,6 +210,7 @@ bool RemoteMjpegStore::Save(const std::string& role_id, const uint8_t* listen_da
 }
 
 bool RemoteMjpegStore::Load(bool speaking, uint8_t** data, size_t* size) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (data == nullptr || size == nullptr) {
         return false;
     }
@@ -240,6 +244,7 @@ bool RemoteMjpegStore::Load(bool speaking, uint8_t** data, size_t* size) {
 }
 
 bool RemoteMjpegStore::HasAssets() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!metadata_loaded_) {
         Reload();
     }
@@ -247,5 +252,6 @@ bool RemoteMjpegStore::HasAssets() {
 }
 
 std::string RemoteMjpegStore::GetRoleId() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     return HasAssets() ? std::string(header_.role_id) : std::string();
 }

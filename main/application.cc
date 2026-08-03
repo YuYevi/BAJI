@@ -130,6 +130,13 @@ static cJSON* BuildMqttDeviceInfoResult() {
     auto& board = Board::GetInstance();
 
     cJSON* root = cJSON_CreateObject();
+    if (root == nullptr) {
+        return nullptr;
+    }
+    auto cleanup_root = [&]() -> cJSON* {
+        cJSON_Delete(root);
+        return nullptr;
+    };
     cJSON_AddNumberToObject(root, "version", 2);
     cJSON_AddStringToObject(root, "language", Lang::CODE);
     cJSON_AddNumberToObject(root, "flash_size", static_cast<double>(SystemInfo::GetFlashSize()));
@@ -167,6 +174,9 @@ static cJSON* BuildMqttDeviceInfoResult() {
     esp_chip_info_t chip_info;
     esp_chip_info(&chip_info);
     cJSON* chip_info_json = cJSON_CreateObject();
+    if (chip_info_json == nullptr) {
+        return cleanup_root();
+    }
     cJSON_AddNumberToObject(chip_info_json, "model", chip_info.model);
     cJSON_AddNumberToObject(chip_info_json, "cores", chip_info.cores);
     cJSON_AddNumberToObject(chip_info_json, "revision", chip_info.revision);
@@ -175,6 +185,9 @@ static cJSON* BuildMqttDeviceInfoResult() {
 
     const esp_app_desc_t* app_desc = esp_app_get_description();
     cJSON* application = cJSON_CreateObject();
+    if (application == nullptr) {
+        return cleanup_root();
+    }
     cJSON_AddStringToObject(application, "name", app_desc->project_name);
     cJSON_AddStringToObject(application, "version", app_desc->version);
     const std::string compile_time =
@@ -190,11 +203,20 @@ static cJSON* BuildMqttDeviceInfoResult() {
     cJSON_AddItemToObject(root, "application", application);
 
     cJSON* partition_table = cJSON_CreateArray();
+    if (partition_table == nullptr) {
+        return cleanup_root();
+    }
+    cJSON_AddItemToObject(root, "partition_table", partition_table);
+
     esp_partition_iterator_t partition_it =
         esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, nullptr);
     while (partition_it != nullptr) {
         const esp_partition_t* partition = esp_partition_get(partition_it);
         cJSON* item = cJSON_CreateObject();
+        if (item == nullptr) {
+            esp_partition_iterator_release(partition_it);
+            return cleanup_root();
+        }
         cJSON_AddStringToObject(item, "label", partition->label);
         cJSON_AddNumberToObject(item, "type", partition->type);
         cJSON_AddNumberToObject(item, "subtype", partition->subtype);
@@ -203,9 +225,11 @@ static cJSON* BuildMqttDeviceInfoResult() {
         cJSON_AddItemToArray(partition_table, item);
         partition_it = esp_partition_next(partition_it);
     }
-    cJSON_AddItemToObject(root, "partition_table", partition_table);
 
     cJSON* ota = cJSON_CreateObject();
+    if (ota == nullptr) {
+        return cleanup_root();
+    }
     if (const esp_partition_t* running_partition = esp_ota_get_running_partition();
         running_partition != nullptr) {
         cJSON_AddStringToObject(ota, "label", running_partition->label);
@@ -213,6 +237,9 @@ static cJSON* BuildMqttDeviceInfoResult() {
     cJSON_AddItemToObject(root, "ota", ota);
 
     cJSON* display = cJSON_CreateObject();
+    if (display == nullptr) {
+        return cleanup_root();
+    }
     if (auto* board_display = board.GetDisplay(); board_display != nullptr) {
         cJSON_AddBoolToObject(display, "monochrome",
                               dynamic_cast<OledDisplay*>(board_display) != nullptr);
@@ -228,7 +255,11 @@ static cJSON* BuildMqttDeviceInfoResult() {
         if (board_json != nullptr) {
             cJSON_Delete(board_json);
         }
-        cJSON_AddItemToObject(root, "board", cJSON_CreateObject());
+        board_json = cJSON_CreateObject();
+        if (board_json == nullptr) {
+            return cleanup_root();
+        }
+        cJSON_AddItemToObject(root, "board", board_json);
     }
 
     return root;
@@ -432,8 +463,21 @@ static bool DownloadFileToPsram(const char* url, size_t max_size, uint8_t** out_
     }
 
     for (int attempt = 1; attempt <= kMaxRetries; ++attempt) {
-        auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
+        auto network = Board::GetInstance().GetNetwork();
+        if (network == nullptr) {
+            ESP_LOGW(TAG, "Network is not ready for download attempt %d", attempt);
+            vTaskDelay(pdMS_TO_TICKS(120));
+            continue;
+        }
+
+        auto http = network->CreateHttp(3);
+        if (http == nullptr) {
+            ESP_LOGW(TAG, "Failed to create HTTP client for download attempt %d", attempt);
+            vTaskDelay(pdMS_TO_TICKS(120));
+            continue;
+        }
         if (!http->Open("GET", url)) {
+            http->Close();
             vTaskDelay(pdMS_TO_TICKS(120));
             continue;
         }
@@ -1263,6 +1307,9 @@ void Application::HandleNetworkDisconnectedEvent() {
     auto state = GetDeviceState();
     auto& board = Board::GetInstance();
     cJSON* root = cJSON_CreateObject();
+    if (root == nullptr) {
+        return;
+    }
     cJSON_AddStringToObject(root, "state", DeviceStateToMqttString(state));
     cJSON_AddStringToObject(root, "network", NetworkModeToString(board.GetActiveNetworkMode()));
     cJSON_AddStringToObject(root, "reason", "network_disconnected");
@@ -1936,6 +1983,10 @@ void Application::PublishMqttTelemetry() {
 
     auto& board = Board::GetInstance();
     cJSON* root = cJSON_CreateObject();
+    if (root == nullptr) {
+        ESP_LOGW(TAG, "Failed to allocate telemetry JSON");
+        return;
+    }
     cJSON_AddStringToObject(root, "deviceId", SystemInfo::GetMacAddress().c_str());
     cJSON_AddStringToObject(root, "state", DeviceStateToMqttString(GetDeviceState()));
     cJSON_AddNumberToObject(root, "timestamp", static_cast<double>(time(nullptr)));
@@ -1957,10 +2008,12 @@ void Application::PublishMqttTelemetry() {
     bool discharging = false;
     if (board.GetBatteryLevel(battery_level, charging, discharging)) {
         cJSON* battery = cJSON_CreateObject();
-        cJSON_AddNumberToObject(battery, "level", battery_level);
-        cJSON_AddBoolToObject(battery, "charging", charging);
-        cJSON_AddBoolToObject(battery, "discharging", discharging);
-        cJSON_AddItemToObject(root, "battery", battery);
+        if (battery != nullptr) {
+            cJSON_AddNumberToObject(battery, "level", battery_level);
+            cJSON_AddBoolToObject(battery, "charging", charging);
+            cJSON_AddBoolToObject(battery, "discharging", discharging);
+            cJSON_AddItemToObject(root, "battery", battery);
+        }
     }
 
     char* json = cJSON_PrintUnformatted(root);
@@ -2229,36 +2282,40 @@ void Application::HandleMqttCommand(const char* json, int len) {
     // 发送指令应答 (Ack)
     if (cJSON_IsString(msg_id) && msg_id->valuestring != nullptr) {
         cJSON* ack = cJSON_CreateObject();
-        cJSON_AddStringToObject(ack, "msgId", msg_id->valuestring);
-        cJSON_AddStringToObject(ack, "status", success ? "success" : "failed");
-        if (success && command_result != nullptr &&
-            cJSON_IsString(method) && method->valuestring != nullptr) {
-            cJSON_AddStringToObject(ack, "method", method->valuestring);
-            cJSON_AddItemToObject(ack, "result", command_result);
-            command_result = nullptr;
+        if (ack != nullptr) {
+            cJSON_AddStringToObject(ack, "msgId", msg_id->valuestring);
+            cJSON_AddStringToObject(ack, "status", success ? "success" : "failed");
+            if (success && command_result != nullptr &&
+                cJSON_IsString(method) && method->valuestring != nullptr) {
+                cJSON_AddStringToObject(ack, "method", method->valuestring);
+                cJSON_AddItemToObject(ack, "result", command_result);
+                command_result = nullptr;
+            }
+            char* ack_json = cJSON_PrintUnformatted(ack);
+            mqtt_control.ReportAck(ack_json);
+            cJSON_free(ack_json);
+            cJSON_Delete(ack);
         }
-        char* ack_json = cJSON_PrintUnformatted(ack);
-        mqtt_control.ReportAck(ack_json);
-        cJSON_free(ack_json);
-        cJSON_Delete(ack);
     }
 
     // 上报指令执行事件
     cJSON* event = cJSON_CreateObject();
-    if (cJSON_IsString(msg_id) && msg_id->valuestring != nullptr) {
-        cJSON_AddStringToObject(event, "msgId", msg_id->valuestring);
+    if (event != nullptr) {
+        if (cJSON_IsString(msg_id) && msg_id->valuestring != nullptr) {
+            cJSON_AddStringToObject(event, "msgId", msg_id->valuestring);
+        }
+        if (cJSON_IsString(method) && method->valuestring != nullptr) {
+            cJSON_AddStringToObject(event, "method", method->valuestring);
+        }
+        cJSON_AddStringToObject(event, "status", success ? "success" : "failed");
+        if (!success) {
+            cJSON_AddStringToObject(event, "reason", reason.c_str());
+        }
+        char* event_json = cJSON_PrintUnformatted(event);
+        mqtt_control.ReportEvent(success ? "cmd_executed" : "cmd_failed", event_json);
+        cJSON_free(event_json);
+        cJSON_Delete(event);
     }
-    if (cJSON_IsString(method) && method->valuestring != nullptr) {
-        cJSON_AddStringToObject(event, "method", method->valuestring);
-    }
-    cJSON_AddStringToObject(event, "status", success ? "success" : "failed");
-    if (!success) {
-        cJSON_AddStringToObject(event, "reason", reason.c_str());
-    }
-    char* event_json = cJSON_PrintUnformatted(event);
-    mqtt_control.ReportEvent(success ? "cmd_executed" : "cmd_failed", event_json);
-    cJSON_free(event_json);
-    cJSON_Delete(event);
 
     if (success && should_publish_telemetry) {
         PublishMqttTelemetry();

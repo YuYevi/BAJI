@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -70,6 +71,7 @@ private:
     bool metadata_loaded_ = false;
     uint32_t region_offset_ = 0;
     uint32_t region_size_ = 0;
+    mutable std::recursive_mutex mutex_;
     SlotMetadata slots_[2];
     bool has_images_[2] = {false, false};
 };

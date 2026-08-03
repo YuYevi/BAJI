@@ -67,7 +67,6 @@ Assets::Assets() {
  * 清理资源分区映射。
  */
 Assets::~Assets() {
-    UnApplyPartition();
 }
 
 /**
@@ -671,21 +670,30 @@ bool Assets::EmoteStrategy::Apply(Assets* assets) {
  */
 bool Assets::Download(std::string url, std::function<void(int progress, size_t speed)> progress_callback) {
     // 先卸载当前分区
-    UnApplyPartition();
 
     // 创建 HTTP 客户端
     auto network = Board::GetInstance().GetNetwork();
+    if (network == nullptr) {
+        ESP_LOGE(TAG, "Network is not ready for asset download");
+        return false;
+    }
     auto http = network->CreateHttp(0);
+    if (http == nullptr) {
+        ESP_LOGE(TAG, "Failed to create asset download HTTP client");
+        return false;
+    }
     
     // 打开 HTTP 连接
     if (!http->Open("GET", url)) {
         ESP_LOGE(TAG, "Failed to open HTTP connection: %s", url.c_str());
+        http->Close();
         return false;
     }
 
     // 检查 HTTP 状态码
     if (http->GetStatusCode() != 200) {
         ESP_LOGE(TAG, "HTTP request failed with status: %d", http->GetStatusCode());
+        http->Close();
         return false;
     }
 
@@ -693,6 +701,7 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
     size_t content_length = http->GetBodyLength();
     if (content_length == 0) {
         ESP_LOGE(TAG, "Content length is zero");
+        http->Close();
         return false;
     }
 
@@ -704,10 +713,13 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
     if (content_length > system_region_size) {
         ESP_LOGE(TAG, "Content size %u exceeds system asset region %u", content_length,
                  system_region_size);
+        http->Close();
         return false;
     }
 
     // 获取扇区大小并计算需要擦除的扇区数
+    UnApplyPartition();
+
     const size_t SECTOR_SIZE = esp_partition_get_main_flash_sector_size();
     size_t sectors_to_erase = (content_length + SECTOR_SIZE - 1) / SECTOR_SIZE;
     (void)sectors_to_erase;  // 实际擦除在循环中按需进行
@@ -716,8 +728,24 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
     char* buffer = (char*)heap_caps_malloc(SECTOR_SIZE, MALLOC_CAP_INTERNAL);
     if (buffer == nullptr) {
         ESP_LOGE(TAG, "Failed to allocate buffer");
+        http->Close();
+        if (!InitializePartition()) {
+            ESP_LOGE(TAG, "Failed to reinitialize partition after download");
+        }
         return false;
     }
+
+    auto cleanup_after_write = [&]() -> bool {
+        http->Close();
+        if (buffer != nullptr) {
+            heap_caps_free(buffer);
+            buffer = nullptr;
+        }
+        if (!InitializePartition()) {
+            ESP_LOGE(TAG, "Failed to reinitialize partition after download");
+        }
+        return false;
+    };
 
     size_t total_written = 0;
     size_t recent_written = 0;
@@ -729,8 +757,7 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
         int ret = http->Read(buffer, SECTOR_SIZE);
         if (ret < 0) {
             ESP_LOGE(TAG, "HTTP read failed");
-            heap_caps_free(buffer);
-            return false;
+            return cleanup_after_write();
         }
 
         if (ret == 0) {
@@ -749,8 +776,7 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
             // 检查扇区是否超出分区范围
             if (sector_end > system_region_size) {
                 ESP_LOGE(TAG, "Sector %u exceeds system asset region", current_sector);
-                heap_caps_free(buffer);
-                return false;
+                return cleanup_after_write();
             }
             
             ESP_LOGD(TAG, "Erasing sector %u (offset: %u, size: %u)", 
@@ -759,8 +785,7 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
             esp_err_t err = esp_partition_erase_range(partition_, sector_start, SECTOR_SIZE);
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to erase sector %u: %s", current_sector, esp_err_to_name(err));
-                heap_caps_free(buffer);
-                return false;
+                return cleanup_after_write();
             }
             
             current_sector++;
@@ -770,8 +795,7 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
         esp_err_t err = esp_partition_write(partition_, total_written, buffer, ret);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Failed to write to partition: %s", esp_err_to_name(err));
-            heap_caps_free(buffer);
-            return false;
+            return cleanup_after_write();
         }
 
         total_written += ret;
@@ -794,14 +818,15 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
     }
     
     // 清理 HTTP 连接和缓冲区
-    http->Close();
-    heap_caps_free(buffer);
-
     // 验证写入数据完整性
     if (total_written != content_length) {
         ESP_LOGE(TAG, "Written size %u mismatch with content length %u", total_written, content_length);
-        return false;
+        return cleanup_after_write();
     }
+
+    http->Close();
+    heap_caps_free(buffer);
+    buffer = nullptr;
 
     // 重新初始化分区
     if (!InitializePartition()) {

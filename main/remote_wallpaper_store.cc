@@ -175,6 +175,7 @@ void RemoteWallpaperStore::ResetMetadata() {
 }
 
 bool RemoteWallpaperStore::IsSupported() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     return EnsurePartition();
 }
 
@@ -236,8 +237,9 @@ bool RemoteWallpaperStore::ReloadSlot(uint8_t mode) {
 
         for (uint32_t i = 0; i < legacy.count; ++i) {
             const LegacyStoredEntry& entry = legacy.entries[i];
+            const uint64_t entry_end = static_cast<uint64_t>(entry.offset) + entry.size;
             if (entry.size == 0 || entry.offset < sizeof(StoredHeaderV1) ||
-                entry.offset + entry.size > legacy.total_size) {
+                entry_end > legacy.total_size) {
                 ESP_LOGW(kTag, "Slot %u legacy entry %u is invalid", static_cast<unsigned>(slot),
                          static_cast<unsigned>(i));
                 slot_data.entries.clear();
@@ -294,8 +296,8 @@ bool RemoteWallpaperStore::ReloadSlot(uint8_t mode) {
 
     for (uint32_t i = 0; i < header.count; ++i) {
         const StoredEntry& entry = entries[i];
-        if (entry.size == 0 || entry.offset < sizeof(StoredHeader) ||
-            entry.offset + entry.size > header.total_size) {
+        const uint64_t entry_end = static_cast<uint64_t>(entry.offset) + entry.size;
+        if (entry.size == 0 || entry.offset < sizeof(StoredHeader) || entry_end > header.total_size) {
             ESP_LOGW(kTag, "Slot %u entry %u is invalid", static_cast<unsigned>(slot),
                      static_cast<unsigned>(i));
             return false;
@@ -309,6 +311,7 @@ bool RemoteWallpaperStore::ReloadSlot(uint8_t mode) {
 }
 
 bool RemoteWallpaperStore::Reload() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!EnsurePartition()) {
         ResetMetadata();
         return false;
@@ -429,6 +432,7 @@ bool RemoteWallpaperStore::SaveSlot(const std::vector<std::pair<const uint8_t*, 
 
 bool RemoteWallpaperStore::Save(const std::vector<std::pair<const uint8_t*, size_t>>& images, uint8_t mode,
                                 uint32_t interval_ms) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!metadata_loaded_) {
         Reload();
     }
@@ -436,6 +440,7 @@ bool RemoteWallpaperStore::Save(const std::vector<std::pair<const uint8_t*, size
 }
 
 bool RemoteWallpaperStore::HasImages(uint8_t mode) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!metadata_loaded_) {
         Reload();
     }
@@ -444,16 +449,19 @@ bool RemoteWallpaperStore::HasImages(uint8_t mode) {
 }
 
 uint32_t RemoteWallpaperStore::GetCount(uint8_t mode) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     uint8_t slot = mode == 1 ? 1 : 0;
     return HasImages(mode) ? slots_[slot].header.count : 0;
 }
 
 uint32_t RemoteWallpaperStore::GetIntervalMs(uint8_t mode) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     uint8_t slot = mode == 1 ? 1 : 0;
     return HasImages(mode) ? slots_[slot].header.interval_ms : kDefaultIntervalMs;
 }
 
 uint8_t RemoteWallpaperStore::GetLastMode() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!metadata_loaded_) {
         Reload();
     }
@@ -470,6 +478,7 @@ uint8_t RemoteWallpaperStore::GetLastMode() {
 }
 
 std::unique_ptr<LvglImage> RemoteWallpaperStore::LoadImage(uint8_t mode, uint32_t index) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     uint8_t slot = mode == 1 ? 1 : 0;
     if (!HasImages(slot) || index >= slots_[slot].entries.size()) {
         return nullptr;

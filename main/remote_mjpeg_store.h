@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 #include <esp_partition.h>
@@ -48,5 +49,6 @@ private:
     bool supported_ = false;
     bool metadata_loaded_ = false;
     bool has_assets_ = false;
+    mutable std::recursive_mutex mutex_;
     StoredHeader header_ = {};
 };

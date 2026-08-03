@@ -877,10 +877,38 @@ std::string EspVideo::Explain(const std::string& question) {
         throw std::runtime_error("Image explain URL or token is not set");
     }
 
+    if (frame_.data == nullptr || frame_.len == 0) {
+        throw std::runtime_error("No camera frame captured");
+    }
+
+    auto network = Board::GetInstance().GetNetwork();
+    if (network == nullptr) {
+        throw std::runtime_error("Network is not ready for image explain");
+    }
+
+    auto http = network->CreateHttp(3);
+    if (http == nullptr) {
+        throw std::runtime_error("Failed to create image explain HTTP client");
+    }
+
+    std::string boundary = "----ESP32_CAMERA_BOUNDARY";
+
+    http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
+    http->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
+    if (!explain_token_.empty()) {
+        http->SetHeader("Authorization", "Bearer " + explain_token_);
+    }
+    http->SetHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
+    http->SetHeader("Transfer-Encoding", "chunked");
+    if (!http->Open("POST", explain_url_)) {
+        http->Close();
+        throw std::runtime_error("Failed to connect to explain URL");
+    }
+
     
     QueueHandle_t jpeg_queue = xQueueCreate(40, sizeof(JpegChunk));
     if (jpeg_queue == nullptr) {
-        
+        http->Close();
         throw std::runtime_error("Failed to create JPEG queue");
     }
 
@@ -915,35 +943,6 @@ std::string EspVideo::Explain(const std::string& question) {
             xQueueSend(jpeg_queue, &chunk, portMAX_DELAY);
         }
     });
-
-    auto network = Board::GetInstance().GetNetwork();
-    auto http = network->CreateHttp(3);
-    
-    std::string boundary = "----ESP32_CAMERA_BOUNDARY";
-
-    
-    http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
-    http->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
-    if (!explain_token_.empty()) {
-        http->SetHeader("Authorization", "Bearer " + explain_token_);
-    }
-    http->SetHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
-    http->SetHeader("Transfer-Encoding", "chunked");
-    if (!http->Open("POST", explain_url_)) {
-        
-        
-        encoder_thread_.join();
-        JpegChunk chunk;
-        while (xQueueReceive(jpeg_queue, &chunk, portMAX_DELAY) == pdPASS) {
-            if (chunk.data != nullptr) {
-                heap_caps_free(chunk.data);
-            } else {
-                break;
-            }
-        }
-        vQueueDelete(jpeg_queue);
-        throw std::runtime_error("Failed to connect to explain URL");
-    }
 
     {
         
@@ -988,6 +987,7 @@ std::string EspVideo::Explain(const std::string& question) {
 
     if (!saw_terminator || total_sent == 0) {
         
+        http->Close();
         throw std::runtime_error("Failed to encode image to JPEG");
     }
 
@@ -1002,6 +1002,7 @@ std::string EspVideo::Explain(const std::string& question) {
 
     if (http->GetStatusCode() != 200) {
         
+        http->Close();
         throw std::runtime_error("Failed to upload photo");
     }
 
