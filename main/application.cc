@@ -266,6 +266,139 @@ static cJSON* BuildMqttDeviceInfoResult() {
     return root;
 }
 
+static cJSON* BuildMqttWakeWordConfigsResult(WakeWord* wake_word) {
+    if (wake_word == nullptr) {
+        return nullptr;
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    if (root == nullptr) {
+        return nullptr;
+    }
+    cJSON* items = cJSON_CreateArray();
+    if (items == nullptr) {
+        cJSON_Delete(root);
+        return nullptr;
+    }
+
+    auto configs = wake_word->GetWakeWordConfigs();
+    cJSON_AddBoolToObject(root, "supported", true);
+    cJSON_AddNumberToObject(root, "count", static_cast<int>(configs.size()));
+    cJSON_AddItemToObject(root, "items", items);
+    for (const auto& config : configs) {
+        cJSON* item = cJSON_CreateObject();
+        if (item == nullptr) {
+            cJSON_Delete(root);
+            return nullptr;
+        }
+        cJSON_AddStringToObject(item, "command", config.command.c_str());
+        cJSON_AddStringToObject(item, "displayText", config.display_text.c_str());
+        cJSON_AddStringToObject(item, "action", config.action.c_str());
+        cJSON_AddItemToArray(items, item);
+    }
+
+    return root;
+}
+
+static cJSON* BuildMqttWakeWordThresholdResult(WakeWord* wake_word) {
+    if (wake_word == nullptr) {
+        return nullptr;
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    if (root == nullptr) {
+        return nullptr;
+    }
+
+    const float threshold = wake_word->GetWakeWordThreshold();
+    cJSON_AddNumberToObject(root, "threshold", threshold);
+    cJSON_AddNumberToObject(root, "thresholdPercent",
+                            static_cast<int>(threshold * 100.0f + 0.5f));
+    return root;
+}
+
+static WakeWord* GetMqttCustomWakeWord(std::string* reason) {
+    auto& audio_service = Application::GetInstance().GetAudioService();
+    audio_service.PrewarmWakeWordDetection();
+    auto* wake_word = audio_service.GetWakeWord();
+    if (wake_word == nullptr || !wake_word->IsCustomWakeWord()) {
+        if (reason != nullptr) {
+            *reason = "wake_word_not_supported";
+        }
+        return nullptr;
+    }
+    return wake_word;
+}
+
+static bool GetMqttStringParam(cJSON* params, const char* name, std::string* out) {
+    if (!cJSON_IsObject(params) || name == nullptr || out == nullptr) {
+        return false;
+    }
+    cJSON* value = cJSON_GetObjectItem(params, name);
+    if (!cJSON_IsString(value) || value->valuestring == nullptr || value->valuestring[0] == '\0') {
+        return false;
+    }
+    *out = value->valuestring;
+    return true;
+}
+
+static bool GetMqttWakeWordDisplayText(cJSON* params, std::string* out) {
+    return GetMqttStringParam(params, "displayText", out) ||
+           GetMqttStringParam(params, "display_text", out);
+}
+
+static bool ParseMqttWakeWordThreshold(cJSON* params, float* threshold, std::string* reason) {
+    if (!cJSON_IsObject(params) || threshold == nullptr) {
+        if (reason != nullptr) {
+            *reason = "missing_threshold";
+        }
+        return false;
+    }
+
+    cJSON* value = cJSON_GetObjectItem(params, "thresholdPercent");
+    bool percent_value = cJSON_IsNumber(value);
+    if (!percent_value) {
+        value = cJSON_GetObjectItem(params, "threshold_percent");
+        percent_value = cJSON_IsNumber(value);
+    }
+    if (!percent_value) {
+        value = cJSON_GetObjectItem(params, "threshold");
+    }
+
+    if (!cJSON_IsNumber(value)) {
+        if (reason != nullptr) {
+            *reason = "missing_threshold";
+        }
+        return false;
+    }
+
+    const double raw_threshold = value->valuedouble;
+    if (percent_value) {
+        if (raw_threshold < 1.0 || raw_threshold > 99.0) {
+            if (reason != nullptr) {
+                *reason = "invalid_threshold";
+            }
+            return false;
+        }
+        *threshold = static_cast<float>(raw_threshold / 100.0);
+        return true;
+    }
+
+    if (raw_threshold > 0.0 && raw_threshold < 1.0) {
+        *threshold = static_cast<float>(raw_threshold);
+        return true;
+    }
+    if (raw_threshold >= 1.0 && raw_threshold <= 99.0) {
+        *threshold = static_cast<float>(raw_threshold / 100.0);
+        return true;
+    }
+
+    if (reason != nullptr) {
+        *reason = "invalid_threshold";
+    }
+    return false;
+}
+
 static void ClearCloudBindingSettings() {
     Settings auth_settings("auth", true);
     auth_settings.EraseAll();
@@ -2192,6 +2325,73 @@ void Application::HandleMqttCommand(const char* json, int len) {
     } else if (strcmp(method->valuestring, "bind_success") == 0) {
         success = true;
         HandleRebindSuccess();
+    } else if (strcmp(method->valuestring, "wake_word_get_configs") == 0) {
+        auto* wake_word = GetMqttCustomWakeWord(&reason);
+        if (wake_word != nullptr) {
+            command_result = BuildMqttWakeWordConfigsResult(wake_word);
+            if (command_result == nullptr) {
+                reason = "wake_word_result_build_failed";
+            } else {
+                success = true;
+            }
+        }
+    } else if (strcmp(method->valuestring, "wake_word_add") == 0) {
+        auto* wake_word = GetMqttCustomWakeWord(&reason);
+        if (wake_word != nullptr) {
+            std::string command;
+            std::string display_text;
+            std::string action = "wake";
+            if (!GetMqttStringParam(params, "command", &command)) {
+                reason = "missing_command";
+            } else if (!GetMqttWakeWordDisplayText(params, &display_text)) {
+                reason = "missing_display_text";
+            } else {
+                GetMqttStringParam(params, "action", &action);
+                WakeWordConfig config{command, display_text, action};
+                if (!wake_word->AddWakeWord(config)) {
+                    reason = "wake_word_add_failed";
+                } else {
+                    success = true;
+                    command_result = BuildMqttWakeWordConfigsResult(wake_word);
+                }
+            }
+        }
+    } else if (strcmp(method->valuestring, "wake_word_remove") == 0) {
+        auto* wake_word = GetMqttCustomWakeWord(&reason);
+        if (wake_word != nullptr) {
+            std::string command;
+            if (!GetMqttStringParam(params, "command", &command)) {
+                reason = "missing_command";
+            } else if (!wake_word->RemoveWakeWord(command)) {
+                reason = "wake_word_remove_failed";
+            } else {
+                success = true;
+                command_result = BuildMqttWakeWordConfigsResult(wake_word);
+            }
+        }
+    } else if (strcmp(method->valuestring, "wake_word_set_threshold") == 0) {
+        auto* wake_word = GetMqttCustomWakeWord(&reason);
+        if (wake_word != nullptr) {
+            float threshold = 0.0f;
+            if (ParseMqttWakeWordThreshold(params, &threshold, &reason)) {
+                if (!wake_word->SetWakeWordThreshold(threshold)) {
+                    reason = "invalid_threshold";
+                } else {
+                    success = true;
+                    command_result = BuildMqttWakeWordThresholdResult(wake_word);
+                }
+            }
+        }
+    } else if (strcmp(method->valuestring, "wake_word_get_threshold") == 0) {
+        auto* wake_word = GetMqttCustomWakeWord(&reason);
+        if (wake_word != nullptr) {
+            command_result = BuildMqttWakeWordThresholdResult(wake_word);
+            if (command_result == nullptr) {
+                reason = "wake_word_result_build_failed";
+            } else {
+                success = true;
+            }
+        }
     } else if (strcmp(method->valuestring, "skin_update") == 0) {
 #if HAVE_LVGL
         SkinMaterialParseResult parsed;
