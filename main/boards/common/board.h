@@ -7,6 +7,7 @@
 #include <udp.h>
 #include <string>
 #include <functional>
+#include <cstdint>
 #include <network_interface.h>
 
 #include "led/led.h"
@@ -88,6 +89,10 @@ public:
     virtual std::string GetDeviceStatusJson() = 0;
     virtual BoardNetworkMode GetActiveNetworkMode() { return BoardNetworkMode::UNSUPPORTED; }
     virtual bool SwitchActiveNetworkMode(BoardNetworkMode mode) { (void)mode; return false; }
+    virtual bool EnterBleBindMode() { return false; }
+    virtual void ExitBleBindMode() {}
+    virtual bool IsBleBindModeActive() const { return false; }
+    virtual uint32_t GetBleBindNonce() const { return 0; }
     virtual bool GetAutoPowerSaveEnabled();
     virtual bool SetAutoPowerSaveEnabled(bool enabled);
 };

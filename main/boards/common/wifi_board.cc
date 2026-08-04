@@ -10,6 +10,7 @@
 #include <freertos/task.h>
 #include <esp_log.h>
 #include <esp_network.h>
+#include <esp_random.h>
 #include <new>
 #include <utility>
 
@@ -25,6 +26,21 @@
 static constexpr int CONNECT_TIMEOUT_SEC = 8;
 static constexpr int BLUFI_AUDIO_STOP_TIMEOUT_MS = 5000;
 static const char* TAG = "WifiBoard";
+
+namespace {
+
+std::string FormatBleBindHint(const char* device_name) {
+    std::string hint = Lang::Strings::CONNECT_WITH_BLUFI;
+    const auto placeholder = hint.find("%s");
+    if (placeholder != std::string::npos) {
+        hint.replace(placeholder, 2, device_name);
+    } else {
+        hint += device_name;
+    }
+    return hint;
+}
+
+}  // namespace
 
 WifiBoard::WifiBoard() {
     
@@ -224,6 +240,55 @@ void WifiBoard::ClearManualWifiConfigMode() {
     wifi_config_generation_.fetch_add(1);
 }
 
+bool WifiBoard::EnsureBleBindModeActive(bool show_ui) {
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    auto& blufi = Blufi::GetInstance();
+    if (!ble_bind_mode_active_.load()) {
+        uint32_t nonce = 0;
+        esp_fill_random(&nonce, sizeof(nonce));
+        if (nonce == 0) {
+            nonce = 1;
+        }
+        ble_bind_nonce_.store(nonce);
+    }
+
+    esp_err_t ret = ESP_OK;
+    {
+        std::lock_guard<std::mutex> stack_lock(blufi_stack_lifecycle_mutex_);
+        ret = blufi.StartBindMode();
+    }
+    if (ret != ESP_OK) {
+        ble_bind_mode_active_.store(false);
+        ble_bind_nonce_.store(0);
+        if (show_ui) {
+            auto* display = GetDisplay();
+            if (display != nullptr) {
+                display->ShowNotification("Bluetooth binding failed to start", 4000);
+            }
+        }
+        return false;
+    }
+
+    ble_bind_mode_active_.store(true);
+
+    if (show_ui) {
+        auto* display = GetDisplay();
+        if (display != nullptr) {
+            std::string hint = FormatBleBindHint(blufi.GetDeviceName());
+            display->ShowPersistentNotification(Lang::Strings::ACTIVATION, true);
+            display->ShowPersistentNotification(hint.c_str(), false);
+            display->SetStatus(Lang::Strings::ACTIVATION);
+            display->SetEmotion("bluetooth");
+            display->SetChatMessage("system", hint.c_str());
+        }
+    }
+    return true;
+#else
+    (void)show_ui;
+    return false;
+#endif
+}
+
 uint32_t WifiBoard::BeginWifiConfigSession(bool manual) {
     std::lock_guard<std::mutex> lock(wifi_config_lifecycle_mutex_);
     if (manual) {
@@ -338,6 +403,9 @@ void WifiBoard::StartWifiConfigMode(uint32_t expected_generation) {
     auto& blufi = Blufi::GetInstance();
     esp_err_t ret = SuspendAudioForBlufi() ? ESP_OK : ESP_ERR_TIMEOUT;
     bool canceled = false;
+    if (ret == ESP_OK && !EnsureBleBindModeActive(false)) {
+        ret = ESP_FAIL;
+    }
     if (ret == ESP_OK) {
         std::lock_guard<std::mutex> stack_lock(blufi_stack_lifecycle_mutex_);
         if (!IsWifiConfigSessionCurrent(generation) || !in_config_mode_.load()) {
@@ -406,7 +474,7 @@ void WifiBoard::StartWifiConfigMode(uint32_t expected_generation) {
 
     std::string device_name = blufi.GetDeviceName();
     Application::GetInstance().Schedule([this, generation, device_name = std::move(device_name)]() {
-        if (!IsWifiConfigSessionCurrent(generation) || !Blufi::GetInstance().IsActive()) {
+        if (!IsWifiConfigSessionCurrent(generation) || !Blufi::GetInstance().IsProvisioning()) {
             return;
         }
         auto* display = Board::GetInstance().GetDisplay();
@@ -460,7 +528,7 @@ bool WifiBoard::SuspendAudioForBlufi() {
 
 void WifiBoard::ResumeAudioAfterBlufi() {
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
-    if (in_config_mode_.load() || Blufi::GetInstance().IsActive()) {
+    if (in_config_mode_.load() || Blufi::GetInstance().IsProvisioning()) {
         return;
     }
     if (!blufi_audio_suspended_.load()) {
@@ -484,7 +552,7 @@ void WifiBoard::StopWifiConfigMode(bool reconnect) {
     bool was_active = manual_wifi_config_mode_.load() || in_config_mode_.exchange(false) ||
                       WifiManager::GetInstance().IsConfigMode();
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
-    was_active = was_active || Blufi::GetInstance().IsActive() ||
+    was_active = was_active || Blufi::GetInstance().IsProvisioning() ||
                  blufi_audio_suspended_.load();
 #endif
     if (!was_active) {
@@ -520,6 +588,42 @@ void WifiBoard::StopWifiConfigMode(bool reconnect) {
         ResumeAudioAfterBlufi();
     });
 #endif
+}
+
+bool WifiBoard::EnterBleBindMode() {
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    return EnsureBleBindModeActive(true);
+#else
+    return Board::EnterBleBindMode();
+#endif
+}
+
+void WifiBoard::ExitBleBindMode() {
+    if (!ble_bind_mode_active_.exchange(false)) {
+        return;
+    }
+    ble_bind_nonce_.store(0);
+
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    if (!Blufi::GetInstance().IsProvisioning()) {
+        std::lock_guard<std::mutex> stack_lock(blufi_stack_lifecycle_mutex_);
+        Blufi::GetInstance().deinit();
+    }
+#endif
+
+    auto* display = GetDisplay();
+    if (display != nullptr) {
+        display->ShowPersistentNotification("", true);
+        display->ShowPersistentNotification("", false);
+    }
+}
+
+bool WifiBoard::IsBleBindModeActive() const {
+    return ble_bind_mode_active_.load();
+}
+
+uint32_t WifiBoard::GetBleBindNonce() const {
+    return ble_bind_nonce_.load();
 }
 
 void WifiBoard::EnterWifiConfigMode() {
@@ -627,7 +731,7 @@ bool WifiBoard::ExitManualWifiConfigMode() {
 
 bool WifiBoard::IsInWifiConfigMode() const {
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
-    return in_config_mode_.load() || Blufi::GetInstance().IsActive();
+    return in_config_mode_.load() || Blufi::GetInstance().IsProvisioning();
 #else
     return in_config_mode_.load() || WifiManager::GetInstance().IsConfigMode();
 #endif
@@ -659,6 +763,10 @@ const char* WifiBoard::GetNetworkStateIcon() {
         return FONT_AWESOME_WIFI_FAIR;
     }
     return FONT_AWESOME_WIFI_WEAK;
+}
+
+BoardNetworkMode WifiBoard::GetActiveNetworkMode() {
+    return BoardNetworkMode::WIFI;
 }
 
 std::string WifiBoard::GetBoardJson() {

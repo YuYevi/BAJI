@@ -31,6 +31,7 @@
 #endif
 
 #include <cstring>
+#include <cstdio>
 #include <limits>
 #include <vector>
 #include <sstream>
@@ -112,6 +113,12 @@ std::unique_ptr<Http> Ota::SetupHttp() {
     http->SetHeader("Activation-Version", has_serial_number_ ? "2" : "1");
     http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
     http->SetHeader("Client-Id", board.GetUuid());
+    if (board.IsBleBindModeActive()) {
+        char nonce_header[9];
+        snprintf(nonce_header, sizeof(nonce_header), "%08lx",
+                 static_cast<unsigned long>(board.GetBleBindNonce()));
+        http->SetHeader("Bind-Nonce", nonce_header);
+    }
     
     if (has_serial_number_) {
         http->SetHeader("Serial-Number", serial_number_.c_str());

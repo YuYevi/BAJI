@@ -58,11 +58,12 @@ static constexpr uint32_t kRebootUiReactionMs = 700;
 static constexpr uint32_t kRebootFinalizeDelayMs = 550;
 static constexpr uint32_t kRebootNotificationMs = 1600;
 static constexpr uint32_t kRebootAudioShutdownDelayMs = 100;
+static constexpr int kBleBindPollIntervalMs = 3000;
+static constexpr int kBleBindPollMaxAttempts = 600;
 static std::atomic<bool> g_skin_download_in_progress{false};
 static std::atomic<bool> g_role_download_in_progress{false};
 static std::atomic<uint32_t> g_skin_notification_generation{0};
-static std::atomic<bool> g_unbind_rebind_in_progress{false};
-static std::atomic<bool> g_rebind_waiting_in_progress{false};
+static std::atomic<bool> g_ble_bind_wait_in_progress{false};
 
 static const char* DeviceStateToMqttString(DeviceState state) {
     switch (state) {
@@ -1519,6 +1520,9 @@ void Application::CheckNewVersion() {
         ota_->MarkCurrentVersionValid();
         // 检查激活状态
         if (!ota_->HasActivationCode() && !ota_->HasActivationChallenge()) {
+            if (board.IsBleBindModeActive()) {
+                board.ExitBleBindMode();
+            }
             break;
         }
 
@@ -1526,20 +1530,29 @@ void Application::CheckNewVersion() {
         display->SetStatus(Lang::Strings::ACTIVATION);
 
         if (ota_->HasActivationCode()) {
+            if (!board.IsBleBindModeActive() && !board.EnterBleBindMode()) {
+                Alert(Lang::Strings::ERROR, Lang::Strings::BLUFI_INIT_FAILED,
+                      "triangle_exclamation", Lang::Sounds::OGG_EXCLAMATION);
+                vTaskDelay(pdMS_TO_TICKS(10000));
+                continue;
+            }
+
             const TickType_t now = xTaskGetTickCount();
             const bool should_play_sound =
                 activation_sound_play_count == 0 ||
                 (activation_sound_play_count < 3 &&
                  (now - last_activation_sound_finished_tick) >= activation_sound_interval);
-            ShowActivationCode(ota_->GetActivationCode(), ota_->GetActivationMessage(),
-                               should_play_sound);
             if (should_play_sound) {
+                audio_service_.PlaySound(Lang::Sounds::OGG_ACTIVATION);
                 ++activation_sound_play_count;
                 if (!audio_service_.WaitForPlaybackQueueEmpty(5000)) {
                     ESP_LOGW(TAG, "Timed out waiting for activation sound playback");
                 }
                 last_activation_sound_finished_tick = xTaskGetTickCount();
             }
+
+            vTaskDelay(pdMS_TO_TICKS(kBleBindPollIntervalMs));
+            continue;
         }
 
         // 尝试激活设备
@@ -2115,105 +2128,65 @@ void Application::HandleMqttCommand(const char* json, int len) {
         success = true;
         Schedule([this]() { Reboot(); });
     } else if (strcmp(method->valuestring, "unbind") == 0) {
-        std::string bind_code;
-        if (cJSON_IsObject(params)) {
-            cJSON* bind_code_json = cJSON_GetObjectItem(params, "bindCode");
-            if (cJSON_IsString(bind_code_json) && bind_code_json->valuestring != nullptr) {
-                bind_code = bind_code_json->valuestring;
-            }
-        }
-        bind_code = TrimAsciiWhitespace(bind_code);
-        if (bind_code.size() >= 2 && bind_code.front() == '`' && bind_code.back() == '`') {
-            bind_code = TrimAsciiWhitespace(bind_code.substr(1, bind_code.size() - 2));
-        }
-        if (bind_code.size() >= 2 && bind_code.front() == '"' && bind_code.back() == '"') {
-            bind_code = TrimAsciiWhitespace(bind_code.substr(1, bind_code.size() - 2));
-        }
-
         ClearCloudBindingSettings();
         success = true;
-        Schedule([this, bind_code]() {
+        Schedule([this]() {
             if (protocol_ && protocol_->IsAudioChannelOpened()) {
                 protocol_->CloseAudioChannel(false);
             }
             protocol_generation_.fetch_add(1);
             protocol_.reset();
+            MqttControl::GetInstance().StopForNetworkSwitch();
 
-            auto display = Board::GetInstance().GetDisplay();
-            if (!bind_code.empty()) {
-                ShowActivationCode(bind_code, "", true);
-                bool expected = false;
-                if (!g_rebind_waiting_in_progress.compare_exchange_strong(expected, true)) {
-                    return;
-                }
-
-                struct BindWaitTaskCtx {
-                    Application* app;
-                };
-                auto* ctx = new BindWaitTaskCtx{this};
-                if (xTaskCreate(
-                        [](void* arg) {
-                            auto* ctx = static_cast<BindWaitTaskCtx*>(arg);
-                            auto* app = ctx->app;
-                            delete ctx;
-
-                            for (int attempt = 0; attempt < 60; ++attempt) {
-                                Ota ota;
-                                if (ota.CheckVersion() == ESP_OK &&
-                                    !ota.HasActivationCode() && !ota.HasActivationChallenge()) {
-                                    app->HandleRebindSuccess();
-                                    break;
-                                }
-                                vTaskDelay(pdMS_TO_TICKS(3000));
-                            }
-
-                            g_rebind_waiting_in_progress = false;
-                            vTaskDelete(nullptr);
-                        },
-                        "bind_wait", 6144, ctx, 4, nullptr) != pdPASS) {
-                    delete ctx;
-                    g_rebind_waiting_in_progress = false;
-                }
+            auto& board = Board::GetInstance();
+            if (!board.EnterBleBindMode()) {
+                Alert(Lang::Strings::ERROR, Lang::Strings::BLUFI_INIT_FAILED,
+                      "triangle_exclamation", Lang::Sounds::OGG_EXCLAMATION);
                 return;
             }
 
             bool expected = false;
-            if (!g_unbind_rebind_in_progress.compare_exchange_strong(expected, true)) {
+            if (!g_ble_bind_wait_in_progress.compare_exchange_strong(expected, true)) {
                 return;
             }
 
-            display->HideActivationQrCode();
-            Alert(Lang::Strings::ACTIVATION, "", "", Lang::Sounds::OGG_ACTIVATION);
+            PlaySound(Lang::Sounds::OGG_ACTIVATION);
 
-            struct UnbindRebindTaskCtx {
+            struct BleBindWaitTaskCtx {
                 Application* app;
             };
-            auto* ctx = new UnbindRebindTaskCtx{this};
+            auto* ctx = new BleBindWaitTaskCtx{this};
             if (xTaskCreate(
                     [](void* arg) {
-                        auto* ctx = static_cast<UnbindRebindTaskCtx*>(arg);
+                        auto* ctx = static_cast<BleBindWaitTaskCtx*>(arg);
                         auto* app = ctx->app;
                         delete ctx;
 
-                        Ota ota;
-                        for (int attempt = 0; attempt < 3; ++attempt) {
-                            if (ota.CheckVersion() == ESP_OK && ota.HasActivationCode()) {
-                                const std::string code = ota.GetActivationCode();
-                                const std::string message = ota.GetActivationMessage();
-                                app->Schedule([app, code, message]() {
-                                    app->ShowActivationCode(code, message, false);
-                                });
+                        for (int attempt = 0; attempt < kBleBindPollMaxAttempts; ++attempt) {
+                            auto& board = Board::GetInstance();
+                            if (!board.IsBleBindModeActive()) {
+                                board.ExitBleBindMode();
                                 break;
                             }
-                            vTaskDelay(pdMS_TO_TICKS(1500 + attempt * 1500));
+
+                            Ota ota;
+                            if (ota.CheckVersion() == ESP_OK &&
+                                !ota.HasActivationCode() && !ota.HasActivationChallenge()) {
+                                app->HandleRebindSuccess();
+                                break;
+                            }
+                            vTaskDelay(pdMS_TO_TICKS(kBleBindPollIntervalMs));
                         }
 
-                        g_unbind_rebind_in_progress = false;
+                        g_ble_bind_wait_in_progress = false;
                         vTaskDelete(nullptr);
                     },
-                    "unbind_rebind", 6144, ctx, 4, nullptr) != pdPASS) {
+                    "ble_bind_wait", 6144, ctx, 4, nullptr) != pdPASS) {
                 delete ctx;
-                g_unbind_rebind_in_progress = false;
+                g_ble_bind_wait_in_progress = false;
+                board.ExitBleBindMode();
+                Alert(Lang::Strings::ERROR, Lang::Strings::BLUFI_INIT_FAILED,
+                      "triangle_exclamation", Lang::Sounds::OGG_EXCLAMATION);
             }
         });
     } else if (strcmp(method->valuestring, "bind_success") == 0) {
@@ -2656,7 +2629,9 @@ void Application::PlaySound(const std::string_view& sound) {
 
 void Application::HandleRebindSuccess() {
     Schedule([this]() {
-        auto display = Board::GetInstance().GetDisplay();
+        auto& board = Board::GetInstance();
+        board.ExitBleBindMode();
+        auto display = board.GetDisplay();
         display->HideActivationQrCode();
         audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
 

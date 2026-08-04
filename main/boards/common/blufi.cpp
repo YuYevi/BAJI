@@ -149,7 +149,8 @@ bool Blufi::IsActive() const {
 }
 
 bool Blufi::IsProvisioning() const {
-    return IsActive() && !m_provisioned.load();
+    std::lock_guard<std::recursive_mutex> lock(m_lifecycle_mutex);
+    return IsActive() && m_wifi_started;
 }
 
 void Blufi::SetProvisioningDoneCallback(std::function<void()> callback) {
@@ -249,7 +250,7 @@ Blufi::~Blufi() {
     }
 }
 
-esp_err_t Blufi::init() {
+esp_err_t Blufi::StartBindMode() {
     std::lock_guard<std::mutex> operation_lock(m_operation_mutex);
     if (IsActive()) {
         return ESP_OK;
@@ -281,16 +282,6 @@ esp_err_t Blufi::init() {
         m_sta_conn_info = {};
     }
 
-    auto& wifi_manager = WifiManager::GetInstance();
-    if (!wifi_manager.IsInitialized() && !wifi_manager.Initialize()) {
-        m_deinited.store(true);
-        return ESP_FAIL;
-    }
-    if (wifi_manager.IsConfigMode()) {
-        wifi_manager.StopConfigAp();
-    }
-    wifi_manager.StopStation();
-
     esp_err_t ret = ESP_OK;
 #if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
     ret = _controller_init();
@@ -313,7 +304,74 @@ esp_err_t Blufi::init() {
     m_host_initialized = true;
     inited_.store(true);
 
-    ret = _start_dedicated_wifi();
+    ESP_LOGI(BLUFI_TAG, "BLUFI bind/config broadcast started as %s", m_device_name);
+    return ESP_OK;
+}
+
+esp_err_t Blufi::init() {
+    std::lock_guard<std::mutex> operation_lock(m_operation_mutex);
+    const bool stack_active = IsActive();
+    {
+        std::lock_guard<std::recursive_mutex> lifecycle_lock(m_lifecycle_mutex);
+        if (stack_active && m_wifi_started) {
+            return ESP_OK;
+        }
+    }
+
+    {
+        std::lock_guard<std::recursive_mutex> lifecycle_lock(m_lifecycle_mutex);
+        m_session_generation.fetch_add(1);
+        m_connect_attempt_generation.store(0);
+        m_ble_connection_generation.fetch_add(1);
+        m_provisioned.store(false);
+        m_finalizing.store(false);
+        m_deinited.store(false);
+        m_deinit_task_scheduled.store(false);
+        m_ble_is_connected.store(false);
+        m_sta_connected.store(false);
+        m_sta_got_ip.store(false);
+        m_sta_connect_failed.store(false);
+        m_sta_is_connecting.store(false);
+        m_scan_in_progress.store(false);
+        m_scan_ble_generation.store(0);
+        m_wifi_driver_state.store(WifiDriverState::kIdle);
+        _invalidate_wifi_attempt();
+        _clear_staged_credentials();
+        memset(m_sta_bssid, 0, sizeof(m_sta_bssid));
+        m_sta_bssid_valid = false;
+        memset(m_sta_ssid, 0, sizeof(m_sta_ssid));
+        m_sta_ssid_len = 0;
+        m_sta_conn_info = {};
+    }
+
+    esp_err_t ret = ESP_OK;
+    if (!stack_active) {
+#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
+        ret = _controller_init();
+        if (ret != ESP_OK) {
+            m_deinited.store(true);
+            return ret;
+        }
+        m_controller_initialized = true;
+#endif
+
+        ret = _host_and_cb_init();
+        if (ret != ESP_OK) {
+#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
+            _controller_deinit();
+            m_controller_initialized = false;
+#endif
+            m_deinited.store(true);
+            return ret;
+        }
+        m_host_initialized = true;
+        inited_.store(true);
+    }
+
+    {
+        std::lock_guard<std::recursive_mutex> lifecycle_lock(m_lifecycle_mutex);
+        ret = _ensure_provisioning_wifi_started();
+    }
     if (ret != ESP_OK) {
         ESP_LOGE(BLUFI_TAG, "Failed to start provisioning Wi-Fi: %s", esp_err_to_name(ret));
         _deinit_locked();
@@ -869,6 +927,23 @@ void Blufi::_cancel_wifi_attempt(bool disconnect_wifi) {
     }
 }
 
+esp_err_t Blufi::_ensure_provisioning_wifi_started() {
+    if (m_wifi_started) {
+        return ESP_OK;
+    }
+
+    auto& wifi_manager = WifiManager::GetInstance();
+    if (!wifi_manager.IsInitialized() && !wifi_manager.Initialize()) {
+        return ESP_FAIL;
+    }
+    if (wifi_manager.IsConfigMode()) {
+        wifi_manager.StopConfigAp();
+    }
+    wifi_manager.StopStation();
+
+    return _start_dedicated_wifi();
+}
+
 bool Blufi::_is_attempt_current(uint32_t session_generation, uint32_t attempt_generation,
                                 uint32_t ble_generation) const {
     return IsActive() && m_session_generation.load() == session_generation &&
@@ -908,6 +983,15 @@ void Blufi::start_wifi_scan() {
         m_sta_is_connecting.load() || m_scan_in_progress.exchange(true)) {
         return;
     }
+    esp_err_t ret = _ensure_provisioning_wifi_started();
+    if (ret != ESP_OK) {
+        m_scan_in_progress.store(false);
+        ESP_LOGE(BLUFI_TAG, "Failed to prepare Wi-Fi scan: %s", esp_err_to_name(ret));
+        if (m_ble_is_connected.load()) {
+            esp_blufi_send_error_info(ESP_BLUFI_WIFI_SCAN_FAIL);
+        }
+        return;
+    }
     m_scan_ble_generation.store(m_ble_connection_generation.load());
 
     wifi_scan_config_t scan_config = {
@@ -916,7 +1000,7 @@ void Blufi::start_wifi_scan() {
         .channel = 0,
         .show_hidden = false,
     };
-    const esp_err_t ret = esp_wifi_scan_start(&scan_config, false);
+    ret = esp_wifi_scan_start(&scan_config, false);
     if (ret != ESP_OK) {
         m_scan_in_progress.store(false);
         ESP_LOGE(BLUFI_TAG, "Failed to start Wi-Fi scan: %s", esp_err_to_name(ret));
@@ -1482,7 +1566,7 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                 break;
             }
             m_ble_connection_generation.fetch_add(1);
-            _cancel_wifi_attempt(true);
+            _cancel_wifi_attempt(m_wifi_started);
             m_ble_is_connected.store(true);
             esp_blufi_adv_stop();
             if (m_provisioned.load()) {
@@ -1496,7 +1580,7 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             m_ble_is_connected.store(false);
             m_ble_connection_generation.fetch_add(1);
             if (IsActive()) {
-                _cancel_wifi_attempt(true);
+                _cancel_wifi_attempt(m_wifi_started);
             }
             if (m_scan_in_progress.exchange(false)) {
                 esp_wifi_scan_stop();
@@ -1524,6 +1608,13 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                 ESP_LOGW(BLUFI_TAG, "Ignoring unsupported provisioning mode %d",
                          param->wifi_mode.op_mode);
                 esp_blufi_send_error_info(ESP_BLUFI_MSG_STATE_ERROR);
+                break;
+            }
+            const esp_err_t ret = _ensure_provisioning_wifi_started();
+            if (ret != ESP_OK) {
+                ESP_LOGE(BLUFI_TAG, "Failed to enter BLUFI provisioning mode: %s",
+                         esp_err_to_name(ret));
+                esp_blufi_send_error_info(ESP_BLUFI_MSG_STATE_ERROR);
             }
             break;
         }
@@ -1531,6 +1622,14 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             if (!IsActive() || !m_ble_is_connected.load() || m_received_ssid_len == 0 ||
                 m_provisioned.load()) {
                 esp_blufi_send_error_info(ESP_BLUFI_DATA_FORMAT_ERROR);
+                break;
+            }
+            const esp_err_t prepare_ret = _ensure_provisioning_wifi_started();
+            if (prepare_ret != ESP_OK) {
+                ESP_LOGE(BLUFI_TAG, "Failed to prepare BLUFI provisioning connect: %s",
+                         esp_err_to_name(prepare_ret));
+                esp_blufi_send_wifi_conn_report(WIFI_MODE_STA, ESP_BLUFI_STA_CONN_FAIL, 0,
+                                                &m_sta_conn_info);
                 break;
             }
             if (m_sta_is_connecting.exchange(true)) {
@@ -1586,7 +1685,7 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                 _schedule_deinit(m_session_generation.load());
                 break;
             }
-            _cancel_wifi_attempt(true);
+            _cancel_wifi_attempt(m_wifi_started);
             break;
         case ESP_BLUFI_EVENT_GET_WIFI_STATUS: {
             if (m_provisioned.load() && m_sta_got_ip.load()) {

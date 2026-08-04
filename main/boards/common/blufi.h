@@ -32,6 +32,8 @@ public:
     
     void start_wifi_scan();
 
+    esp_err_t StartBindMode();
+
     
     esp_err_t init();
 
@@ -93,6 +95,7 @@ private:
     void _clear_staged_credentials();
     void _invalidate_wifi_attempt();
     void _cancel_wifi_attempt(bool disconnect_wifi);
+    esp_err_t _ensure_provisioning_wifi_started();
     bool _is_attempt_current(uint32_t session_generation, uint32_t attempt_generation,
                              uint32_t ble_generation) const;
     esp_err_t _drain_default_event_loop(TickType_t timeout_ticks);
