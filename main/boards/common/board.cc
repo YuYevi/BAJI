@@ -13,16 +13,6 @@
 
 #include <cstdio>
 
-namespace {
-
-std::string FormatU32Hex(uint32_t value) {
-    char buffer[9];
-    snprintf(buffer, sizeof(buffer), "%08lx", static_cast<unsigned long>(value));
-    return std::string(buffer);
-}
-
-}  // namespace
-
 Board::Board() {
     Settings settings("board", true);
     uuid_ = settings.GetString("uuid");
@@ -97,9 +87,6 @@ std::string Board::GetSystemInfoJson() {
     json += R"("minimum_free_heap_size":")" + std::to_string(SystemInfo::GetMinimumFreeHeapSize()) + R"(",)";
     json += R"("mac_address":")" + SystemInfo::GetMacAddress() + R"(",)";
     json += R"("uuid":")" + uuid_ + R"(",)";
-    if (IsBleBindModeActive()) {
-        json += R"("ble_bind_nonce":")" + FormatU32Hex(GetBleBindNonce()) + R"(",)";
-    }
     json += R"("chip_model_name":")" + SystemInfo::GetChipModelName() + R"(",)";
 
     esp_chip_info_t chip_info;

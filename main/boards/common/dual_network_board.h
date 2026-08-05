@@ -58,10 +58,10 @@ public:
     virtual std::string GetDeviceStatusJson() override;
     virtual BoardNetworkMode GetActiveNetworkMode() override;
     virtual bool SwitchActiveNetworkMode(BoardNetworkMode mode) override;
-    virtual bool EnterBleBindMode() override;
+    virtual bool EnterBleBindMode(
+        BleSetupMode setup_mode = BleSetupMode::BIND_ONLY) override;
     virtual void ExitBleBindMode() override;
     virtual bool IsBleBindModeActive() const override;
-    virtual uint32_t GetBleBindNonce() const override;
 };
 
 #endif 

@@ -22,6 +22,7 @@
 #include "freertos/task.h"
 #include "mbedtls/aes.h"
 #include "mbedtls/dhm.h"
+#include "board.h"
 #include "wifi_manager.h"
 
 class Blufi {
@@ -32,7 +33,7 @@ public:
     
     void start_wifi_scan();
 
-    esp_err_t StartBindMode();
+    esp_err_t StartBindMode(BleSetupMode setup_mode);
 
     
     esp_err_t init();
@@ -219,7 +220,8 @@ private:
     SemaphoreHandle_t m_event_drain_semaphore = nullptr;
     bool m_wifi_started = false;
 
-    std::array<uint8_t, 29> m_identity_scan_response{};
+    std::array<uint8_t, 30> m_identity_scan_response{};
+    std::atomic<BleSetupMode> m_setup_mode{BleSetupMode::BIND_ONLY};
     char m_device_name[32]{};
 
     std::atomic<uint32_t> m_session_generation{0};

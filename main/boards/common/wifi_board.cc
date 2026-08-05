@@ -10,7 +10,6 @@
 #include <freertos/task.h>
 #include <esp_log.h>
 #include <esp_network.h>
-#include <esp_random.h>
 #include <new>
 #include <utility>
 
@@ -240,26 +239,17 @@ void WifiBoard::ClearManualWifiConfigMode() {
     wifi_config_generation_.fetch_add(1);
 }
 
-bool WifiBoard::EnsureBleBindModeActive(bool show_ui) {
+bool WifiBoard::EnsureBleBindModeActive(BleSetupMode setup_mode, bool show_ui) {
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     auto& blufi = Blufi::GetInstance();
-    if (!ble_bind_mode_active_.load()) {
-        uint32_t nonce = 0;
-        esp_fill_random(&nonce, sizeof(nonce));
-        if (nonce == 0) {
-            nonce = 1;
-        }
-        ble_bind_nonce_.store(nonce);
-    }
 
     esp_err_t ret = ESP_OK;
     {
         std::lock_guard<std::mutex> stack_lock(blufi_stack_lifecycle_mutex_);
-        ret = blufi.StartBindMode();
+        ret = blufi.StartBindMode(setup_mode);
     }
     if (ret != ESP_OK) {
         ble_bind_mode_active_.store(false);
-        ble_bind_nonce_.store(0);
         if (show_ui) {
             auto* display = GetDisplay();
             if (display != nullptr) {
@@ -284,6 +274,7 @@ bool WifiBoard::EnsureBleBindModeActive(bool show_ui) {
     }
     return true;
 #else
+    (void)setup_mode;
     (void)show_ui;
     return false;
 #endif
@@ -403,7 +394,8 @@ void WifiBoard::StartWifiConfigMode(uint32_t expected_generation) {
     auto& blufi = Blufi::GetInstance();
     esp_err_t ret = SuspendAudioForBlufi() ? ESP_OK : ESP_ERR_TIMEOUT;
     bool canceled = false;
-    if (ret == ESP_OK && !EnsureBleBindModeActive(false)) {
+    if (ret == ESP_OK &&
+        !EnsureBleBindModeActive(BleSetupMode::WIFI_PROVISION_AND_BIND, false)) {
         ret = ESP_FAIL;
     }
     if (ret == ESP_OK) {
@@ -590,11 +582,11 @@ void WifiBoard::StopWifiConfigMode(bool reconnect) {
 #endif
 }
 
-bool WifiBoard::EnterBleBindMode() {
+bool WifiBoard::EnterBleBindMode(BleSetupMode setup_mode) {
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
-    return EnsureBleBindModeActive(true);
+    return EnsureBleBindModeActive(setup_mode, true);
 #else
-    return Board::EnterBleBindMode();
+    return Board::EnterBleBindMode(setup_mode);
 #endif
 }
 
@@ -602,8 +594,6 @@ void WifiBoard::ExitBleBindMode() {
     if (!ble_bind_mode_active_.exchange(false)) {
         return;
     }
-    ble_bind_nonce_.store(0);
-
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     if (!Blufi::GetInstance().IsProvisioning()) {
         std::lock_guard<std::mutex> stack_lock(blufi_stack_lifecycle_mutex_);
@@ -620,10 +610,6 @@ void WifiBoard::ExitBleBindMode() {
 
 bool WifiBoard::IsBleBindModeActive() const {
     return ble_bind_mode_active_.load();
-}
-
-uint32_t WifiBoard::GetBleBindNonce() const {
-    return ble_bind_nonce_.load();
 }
 
 void WifiBoard::EnterWifiConfigMode() {

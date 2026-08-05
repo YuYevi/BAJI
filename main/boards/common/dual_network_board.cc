@@ -115,11 +115,11 @@ bool DualNetworkBoard::SwitchActiveNetworkMode(BoardNetworkMode mode) {
     return true;
 }
 
-bool DualNetworkBoard::EnterBleBindMode() {
+bool DualNetworkBoard::EnterBleBindMode(BleSetupMode setup_mode) {
     if (network_type_ == NetworkType::WIFI && current_board_ != nullptr) {
-        return current_board_->EnterBleBindMode();
+        return current_board_->EnterBleBindMode(setup_mode);
     }
-    return Board::EnterBleBindMode();
+    return Board::EnterBleBindMode(setup_mode);
 }
 
 void DualNetworkBoard::ExitBleBindMode() {
@@ -135,11 +135,4 @@ bool DualNetworkBoard::IsBleBindModeActive() const {
         return current_board_->IsBleBindModeActive();
     }
     return Board::IsBleBindModeActive();
-}
-
-uint32_t DualNetworkBoard::GetBleBindNonce() const {
-    if (network_type_ == NetworkType::WIFI && current_board_ != nullptr) {
-        return current_board_->GetBleBindNonce();
-    }
-    return Board::GetBleBindNonce();
 }

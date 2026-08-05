@@ -44,6 +44,11 @@ enum class BoardNetworkMode {
     UNSUPPORTED,
 };
 
+enum class BleSetupMode : uint8_t {
+    BIND_ONLY = 0x00,
+    WIFI_PROVISION_AND_BIND = 0x01,
+};
+
 
 
 using NetworkEventCallback = std::function<void(NetworkEvent event, const std::string& data)>;
@@ -89,10 +94,12 @@ public:
     virtual std::string GetDeviceStatusJson() = 0;
     virtual BoardNetworkMode GetActiveNetworkMode() { return BoardNetworkMode::UNSUPPORTED; }
     virtual bool SwitchActiveNetworkMode(BoardNetworkMode mode) { (void)mode; return false; }
-    virtual bool EnterBleBindMode() { return false; }
+    virtual bool EnterBleBindMode(BleSetupMode setup_mode = BleSetupMode::BIND_ONLY) {
+        (void)setup_mode;
+        return false;
+    }
     virtual void ExitBleBindMode() {}
     virtual bool IsBleBindModeActive() const { return false; }
-    virtual uint32_t GetBleBindNonce() const { return 0; }
     virtual bool GetAutoPowerSaveEnabled();
     virtual bool SetAutoPowerSaveEnabled(bool enabled);
 };

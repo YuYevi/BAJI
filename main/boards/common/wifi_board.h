@@ -15,7 +15,6 @@ protected:
     std::atomic_bool in_config_mode_{false};
     std::atomic_bool manual_wifi_config_mode_{false};
     std::atomic_bool ble_bind_mode_active_{false};
-    std::atomic<uint32_t> ble_bind_nonce_{0};
     // Invalidates delayed start and notification work from older config sessions.
     std::atomic<uint32_t> wifi_config_generation_{0};
     // Orders session changes with persistent-notification show/clear operations.
@@ -52,7 +51,7 @@ protected:
 
     void ClearManualWifiConfigMode();
 
-    bool EnsureBleBindModeActive(bool show_ui);
+    bool EnsureBleBindModeActive(BleSetupMode setup_mode, bool show_ui);
 
     uint32_t BeginWifiConfigSession(bool manual = false);
 
@@ -85,10 +84,10 @@ public:
     virtual void SetPowerSaveLevel(PowerSaveLevel level) override;
     virtual AudioCodec* GetAudioCodec() override { return nullptr; }
     virtual std::string GetDeviceStatusJson() override;
-    virtual bool EnterBleBindMode() override;
+    virtual bool EnterBleBindMode(
+        BleSetupMode setup_mode = BleSetupMode::BIND_ONLY) override;
     virtual void ExitBleBindMode() override;
     virtual bool IsBleBindModeActive() const override;
-    virtual uint32_t GetBleBindNonce() const override;
     
     
     void EnterWifiConfigMode();

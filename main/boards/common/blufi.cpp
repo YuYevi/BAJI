@@ -82,8 +82,8 @@ constexpr uint8_t kServiceDataAdType = 0x16;
 constexpr uint8_t kBlufiServiceUuidLow = 0xFF;
 constexpr uint8_t kBlufiServiceUuidHigh = 0xFF;
 constexpr uint8_t kDeviceIdentityType = 0x01;
-constexpr uint8_t kDeviceIdentityVersion = 0x01;
-constexpr uint8_t kDeviceIdentityFields = 0x03;
+constexpr uint8_t kDeviceIdentityVersion = 0x02;
+constexpr uint8_t kDeviceIdentityFields = 0x07;
 
 int HexValue(char value) {
     if (value >= '0' && value <= '9') {
@@ -190,6 +190,7 @@ esp_err_t Blufi::_configure_identity_scan_response() {
     offset += sta_mac.size();
     memcpy(m_identity_scan_response.data() + offset, client_uuid.data(), client_uuid.size());
     offset += client_uuid.size();
+    m_identity_scan_response[offset++] = static_cast<uint8_t>(m_setup_mode.load());
     assert(offset == m_identity_scan_response.size());
 
 #ifdef CONFIG_BT_BLUEDROID_ENABLED
@@ -250,9 +251,14 @@ Blufi::~Blufi() {
     }
 }
 
-esp_err_t Blufi::StartBindMode() {
+esp_err_t Blufi::StartBindMode(BleSetupMode setup_mode) {
     std::lock_guard<std::mutex> operation_lock(m_operation_mutex);
+    const BleSetupMode previous_mode = m_setup_mode.exchange(setup_mode);
     if (IsActive()) {
+        if (previous_mode != setup_mode && !m_ble_is_connected.load()) {
+            esp_blufi_adv_stop();
+            _start_advertising();
+        }
         return ESP_OK;
     }
 
