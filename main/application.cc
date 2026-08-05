@@ -923,6 +923,39 @@ static void DownloadRoleMjpegTask(void* arg) {
     std::unique_ptr<RoleSwitchTaskPayload> payload(static_cast<RoleSwitchTaskPayload*>(arg));
     DownloadedWallpaperData listen_mjpeg;
     DownloadedWallpaperData speak_mjpeg;
+    const uint32_t notification_gen = g_skin_notification_generation.fetch_add(1) + 1;
+
+    auto schedule_top_notification = [&](std::string text) {
+        if (payload == nullptr || payload->app == nullptr) {
+            return;
+        }
+        payload->app->Schedule([notification_gen, text = std::move(text)]() {
+            if (notification_gen != g_skin_notification_generation.load()) {
+                return;
+            }
+            auto* display = Board::GetInstance().GetDisplay();
+            if (display != nullptr) {
+                display->ShowPersistentNotification(text.c_str(), true);
+            }
+        });
+    };
+    auto schedule_result_notification = [&](const char* text, uint32_t duration_ms) {
+        if (payload == nullptr || payload->app == nullptr || text == nullptr) {
+            return;
+        }
+        payload->app->Schedule([notification_gen, duration_ms, text = std::string(text)]() {
+            uint32_t expected = notification_gen;
+            if (!g_skin_notification_generation.compare_exchange_strong(
+                    expected, notification_gen + 1)) {
+                return;
+            }
+            auto* display = Board::GetInstance().GetDisplay();
+            if (display != nullptr) {
+                display->ShowPersistentNotification("", true);
+                display->ShowNotification(text.c_str(), duration_ms);
+            }
+        });
+    };
 
     auto cleanup = [&]() {
         if (listen_mjpeg.data != nullptr) {
@@ -935,6 +968,8 @@ static void DownloadRoleMjpegTask(void* arg) {
         g_role_download_in_progress.store(false);
     };
 
+    schedule_top_notification("正在更换背景图片...");
+
     bool downloaded = payload != nullptr && payload->app != nullptr &&
                       DownloadFileToPsram(payload->parsed.listen_mjpeg_url.c_str(),
                                           RemoteAssetRegions::kMjpegSize, &listen_mjpeg.data,
@@ -944,6 +979,7 @@ static void DownloadRoleMjpegTask(void* arg) {
                                           &speak_mjpeg.size);
     if (!downloaded) {
         ESP_LOGW(TAG, "Failed to download role MJPEG files");
+        schedule_result_notification("更换失败", kSkinSyncToastFailedMs);
         cleanup();
         vTaskDelete(nullptr);
         return;
@@ -953,6 +989,7 @@ static void DownloadRoleMjpegTask(void* arg) {
             payload->parsed.role_id, listen_mjpeg.data, listen_mjpeg.size, speak_mjpeg.data,
             speak_mjpeg.size)) {
         ESP_LOGW(TAG, "Failed to persist role MJPEG files");
+        schedule_result_notification("更换失败", kSkinSyncToastFailedMs);
         cleanup();
         vTaskDelete(nullptr);
         return;
@@ -965,6 +1002,7 @@ static void DownloadRoleMjpegTask(void* arg) {
             smartwatch_ui_runtime_reload_ai_chat_mjpeg();
         }
     });
+    schedule_result_notification("更换完成", kSkinSyncToastCompletedMs);
     ESP_LOGI(TAG, "Role MJPEG files updated for role '%s'", payload->parsed.role_id.c_str());
 
     cleanup();
