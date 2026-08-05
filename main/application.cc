@@ -347,6 +347,66 @@ static bool GetMqttWakeWordDisplayText(cJSON* params, std::string* out) {
            GetMqttStringParam(params, "display_text", out);
 }
 
+static bool ParseMqttWakeWordConfigs(cJSON* params, std::vector<WakeWordConfig>* configs,
+                                     std::string* reason) {
+    if (!cJSON_IsObject(params) || configs == nullptr) {
+        if (reason != nullptr) {
+            *reason = "missing_items";
+        }
+        return false;
+    }
+
+    cJSON* items = cJSON_GetObjectItem(params, "items");
+    if (!cJSON_IsArray(items) || cJSON_GetArraySize(items) <= 0) {
+        if (reason != nullptr) {
+            *reason = "missing_items";
+        }
+        return false;
+    }
+
+    std::vector<WakeWordConfig> parsed_configs;
+    for (int i = 0; i < cJSON_GetArraySize(items); ++i) {
+        cJSON* item = cJSON_GetArrayItem(items, i);
+        if (!cJSON_IsObject(item)) {
+            if (reason != nullptr) {
+                *reason = "invalid_item";
+            }
+            return false;
+        }
+
+        std::string command;
+        std::string display_text;
+        std::string action = "wake";
+        if (!GetMqttStringParam(item, "command", &command)) {
+            if (reason != nullptr) {
+                *reason = "missing_command";
+            }
+            return false;
+        }
+        if (!GetMqttWakeWordDisplayText(item, &display_text)) {
+            if (reason != nullptr) {
+                *reason = "missing_display_text";
+            }
+            return false;
+        }
+        GetMqttStringParam(item, "action", &action);
+
+        for (const auto& existing : parsed_configs) {
+            if (existing.command == command) {
+                if (reason != nullptr) {
+                    *reason = "duplicate_command";
+                }
+                return false;
+            }
+        }
+
+        parsed_configs.push_back({command, display_text, action});
+    }
+
+    *configs = std::move(parsed_configs);
+    return true;
+}
+
 static bool ParseMqttWakeWordThreshold(cJSON* params, float* threshold, std::string* reason) {
     if (!cJSON_IsObject(params) || threshold == nullptr) {
         if (reason != nullptr) {
@@ -2325,6 +2385,20 @@ void Application::HandleMqttCommand(const char* json, int len) {
     } else if (strcmp(method->valuestring, "bind_success") == 0) {
         success = true;
         HandleRebindSuccess();
+    } else if (strcmp(method->valuestring, "wake_word_set_all") == 0 ||
+               strcmp(method->valuestring, "wake_word_sync") == 0) {
+        auto* wake_word = GetMqttCustomWakeWord(&reason);
+        if (wake_word != nullptr) {
+            std::vector<WakeWordConfig> configs;
+            if (ParseMqttWakeWordConfigs(params, &configs, &reason)) {
+                if (!wake_word->SetWakeWordConfigs(configs)) {
+                    reason = "wake_word_set_all_failed";
+                } else {
+                    success = true;
+                    command_result = BuildMqttWakeWordConfigsResult(wake_word);
+                }
+            }
+        }
     } else if (strcmp(method->valuestring, "wake_word_get_configs") == 0) {
         auto* wake_word = GetMqttCustomWakeWord(&reason);
         if (wake_word != nullptr) {

@@ -498,6 +498,52 @@ bool CustomWakeWord::RemoveWakeWord(const std::string& command) {
     return true;
 }
 
+bool CustomWakeWord::SetWakeWordConfigs(const std::vector<WakeWordConfig>& configs) {
+    if (configs.empty()) {
+        return false;
+    }
+
+    std::deque<Command> next_commands;
+    for (const auto& config : configs) {
+        if (config.command.empty() || config.display_text.empty()) {
+            return false;
+        }
+        for (const auto& existing : next_commands) {
+            if (existing.command == config.command) {
+                return false;
+            }
+        }
+        next_commands.push_back({
+            config.command,
+            config.display_text,
+            config.action.empty() ? "wake" : config.action
+        });
+    }
+
+    bool was_running = running_;
+    if (was_running) {
+        Stop();
+    }
+
+    auto previous_commands = commands_;
+    commands_ = std::move(next_commands);
+    if (!PersistCurrentConfig()) {
+        commands_ = std::move(previous_commands);
+        if (was_running) {
+            Start();
+        }
+        return false;
+    }
+
+    RefreshActiveCommands();
+
+    if (was_running) {
+        Start();
+    }
+
+    return true;
+}
+
 bool CustomWakeWord::SetWakeWordThreshold(float threshold) {
     if (threshold < 0.0f || threshold > 1.0f) {
         return false;

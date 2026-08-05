@@ -32,6 +32,7 @@ public:
     virtual std::vector<WakeWordConfig> GetWakeWordConfigs() const { return {}; }
     virtual bool AddWakeWord(const WakeWordConfig& config) { return false; }
     virtual bool RemoveWakeWord(const std::string& command) { return false; }
+    virtual bool SetWakeWordConfigs(const std::vector<WakeWordConfig>& configs) { return false; }
     virtual bool SetWakeWordThreshold(float threshold) { return false; }
     virtual float GetWakeWordThreshold() const { return 0.0f; }
 };

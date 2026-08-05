@@ -36,6 +36,7 @@ public:
     std::vector<WakeWordConfig> GetWakeWordConfigs() const override;
     bool AddWakeWord(const WakeWordConfig& config) override;
     bool RemoveWakeWord(const std::string& command) override;
+    bool SetWakeWordConfigs(const std::vector<WakeWordConfig>& configs) override;
     bool SetWakeWordThreshold(float threshold) override;
     float GetWakeWordThreshold() const override { return threshold_; }
 
