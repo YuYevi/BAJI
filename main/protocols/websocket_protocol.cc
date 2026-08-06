@@ -224,7 +224,14 @@ bool WebsocketProtocol::OpenAudioChannel() {
 
     
     auto message = GetHelloMessage();
-    if (message.empty() || !SendText(message)) {
+    if (message.empty()) {
+        SetError(Lang::Strings::SERVER_ERROR);
+        return false;
+    }
+    if (!SendText(message)) {
+        if (!error_occurred_) {
+            SetError(Lang::Strings::SERVER_ERROR);
+        }
         return false;
     }
 

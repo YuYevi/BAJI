@@ -298,7 +298,14 @@ bool MqttProtocol::OpenAudioChannel() {
     xEventGroupClearBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT);
 
     auto message = GetHelloMessage();
-    if (message.empty() || !SendText(message)) {
+    if (message.empty()) {
+        SetError(Lang::Strings::SERVER_ERROR);
+        return false;
+    }
+    if (!SendText(message)) {
+        if (!error_occurred_) {
+            SetError(Lang::Strings::SERVER_ERROR);
+        }
         return false;
     }
 

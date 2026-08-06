@@ -19,6 +19,9 @@
 #include "abnormal_reporter.h"
 #include "assets.h"
 #include "settings.h"
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+#include "blufi.h"
+#endif
 
 #if HAVE_LVGL
 #include "lcd_display.h"
@@ -54,12 +57,15 @@ static constexpr uint32_t kNetworkToastProgressMs = 1800;
 static constexpr uint32_t kNetworkToastConnectedMs = 2200;
 static constexpr uint32_t kSkinSyncToastCompletedMs = 2200;
 static constexpr uint32_t kSkinSyncToastFailedMs = 2200;
+static constexpr uint32_t kAiChatConnectionErrorNoticeMs = 2000;
 static constexpr uint32_t kRebootUiReactionMs = 700;
 static constexpr uint32_t kRebootFinalizeDelayMs = 550;
 static constexpr uint32_t kRebootNotificationMs = 1600;
 static constexpr uint32_t kRebootAudioShutdownDelayMs = 100;
 static constexpr int kBleBindPollIntervalMs = 3000;
-static constexpr int kBleBindPollMaxAttempts = 600;
+static constexpr int kBleBindTimeoutNotifyAttempts = 600;
+static constexpr int kBleBindTimeoutNoticeMs = 5000;
+static constexpr int kActivationRetryDelayMaxSec = 60;
 static std::atomic<bool> g_skin_download_in_progress{false};
 static std::atomic<bool> g_role_download_in_progress{false};
 static std::atomic<uint32_t> g_skin_notification_generation{0};
@@ -115,6 +121,31 @@ static const char* NetworkModeToMqttString(BoardNetworkMode mode) {
 static bool HasCachedProtocolConfig() {
     Settings websocket_settings("websocket", false);
     return !websocket_settings.GetString("url").empty();
+}
+
+static std::string FormatStringWithDeviceName(std::string text, const char* device_name) {
+    const char* value = device_name != nullptr ? device_name : "";
+    const auto placeholder = text.find("%s");
+    if (placeholder != std::string::npos) {
+        text.replace(placeholder, 2, value);
+    } else if (value[0] != '\0') {
+        text += value;
+    }
+    return text;
+}
+
+static std::string BuildBleBindTimeoutNotice() {
+    std::string notice = Lang::Strings::SERVER_TIMEOUT;
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    std::string hint =
+        FormatStringWithDeviceName(Lang::Strings::CONNECT_WITH_BLUFI,
+                                   Blufi::GetInstance().GetDeviceName());
+    if (!hint.empty()) {
+        notice += "\n";
+        notice += hint;
+    }
+#endif
+    return notice;
 }
 
 static const char* BatteryStateToMqttString(bool charging, bool discharging) {
@@ -468,6 +499,9 @@ static void ClearCloudBindingSettings() {
 
     Settings websocket_settings("websocket", true);
     websocket_settings.EraseAll();
+
+    Settings mqtt_ctrl_settings("mqtt_ctrl", true);
+    mqtt_ctrl_settings.EraseAll();
 }
 
 #if HAVE_LVGL
@@ -1205,9 +1239,35 @@ void Application::Run() {
 
         if (bits & MAIN_EVENT_ERROR) {
             // 处理错误事件
-            keep_ai_chat_visible_on_idle_ = true;
-            idle_assistant_message_ = last_error_message_;
-            SetDeviceState(kDeviceStateIdle);
+            const auto state = GetDeviceState();
+            std::string error_message = last_error_message_.empty()
+                                            ? Lang::Strings::SERVER_NOT_CONNECTED
+                                            : last_error_message_;
+            last_error_message_.clear();
+            keep_ai_chat_visible_on_idle_ = false;
+            idle_assistant_message_.clear();
+            pending_idle_notification_.clear();
+            pending_idle_notification_duration_ms_ = 0;
+
+            const bool ai_runtime_state = state == kDeviceStateIdle ||
+                                          state == kDeviceStateConnecting ||
+                                          state == kDeviceStateListening ||
+                                          state == kDeviceStateSpeaking;
+            if (ai_runtime_state) {
+                pending_idle_notification_ = std::move(error_message);
+                pending_idle_notification_duration_ms_ = kAiChatConnectionErrorNoticeMs;
+                if (state == kDeviceStateIdle || !SetDeviceState(kDeviceStateIdle)) {
+                    auto display = Board::GetInstance().GetDisplay();
+                    display->SetStatus(Lang::Strings::STANDBY);
+                    display->ClearChatMessages();
+                    display->SetEmotion("neutral");
+                    ShowPendingIdleNotification(display);
+                    RefreshWakeWordDetection();
+                }
+            } else {
+                auto display = Board::GetInstance().GetDisplay();
+                display->ShowNotification(error_message.c_str(), kAiChatConnectionErrorNoticeMs);
+            }
             audio_service_.PlaySound(Lang::Sounds::OGG_EXCLAMATION);
         }
 
@@ -1683,11 +1743,11 @@ void Application::CheckNewVersion() {
     int activation_sound_play_count = 0;
     TickType_t last_activation_sound_finished_tick = 0;
     bool waiting_for_activation = false;
+    bool activation_bind_ui_shown = false;
+    bool activation_status_ui_shown = false;
+    std::string last_activation_status_message;
 
     auto& board = Board::GetInstance();
-    const bool use_cached_config_on_failure =
-        board.GetActiveNetworkMode() == BoardNetworkMode::WIFI && HasCachedProtocolConfig();
-    const int max_retry = use_cached_config_on_failure ? 1 : MAX_RETRY;
     int silent_retry_count =
         board.GetActiveNetworkMode() == BoardNetworkMode::CELLULAR ? 2 : 0;
     while (true) {
@@ -1700,14 +1760,27 @@ void Application::CheckNewVersion() {
         esp_err_t err = ota_->CheckVersion();
         if (err != ESP_OK) {
             retry_count++;
+            const bool use_cached_config_on_failure =
+                !waiting_for_activation &&
+                board.GetActiveNetworkMode() == BoardNetworkMode::WIFI &&
+                HasCachedProtocolConfig();
+            const int max_retry = use_cached_config_on_failure ? 1 : MAX_RETRY;
             if (retry_count >= max_retry) {
                 if (use_cached_config_on_failure) {
                     ESP_LOGW(TAG,
                              "Version check failed, continue with cached protocol config: "
                              "code=%d, url=%s",
                              err, ota_->GetCheckVersionUrl().c_str());
+                    return;
                 }
-                return;
+                if (!waiting_for_activation) {
+                    return;
+                }
+                ESP_LOGW(TAG,
+                         "Version check failed while activation is pending, keep waiting: "
+                         "code=%d, url=%s",
+                         err, ota_->GetCheckVersionUrl().c_str());
+                retry_count = 0;
             }
 
             // 失败重试逻辑
@@ -1734,7 +1807,7 @@ void Application::CheckNewVersion() {
                 }
             }
             if (!used_silent_retry) {
-                retry_delay *= 2;
+                retry_delay = std::min(retry_delay * 2, kActivationRetryDelayMaxSec);
             }
             continue;
         }
@@ -1761,12 +1834,15 @@ void Application::CheckNewVersion() {
         display->SetStatus(Lang::Strings::ACTIVATION);
 
         if (ota_->HasActivationCode()) {
-            if (!board.IsBleBindModeActive() && !board.EnterBleBindMode()) {
+            if ((!activation_bind_ui_shown || !board.IsBleBindModeActive()) &&
+                !board.EnterBleBindMode()) {
                 Alert(Lang::Strings::ERROR, Lang::Strings::BLUFI_INIT_FAILED,
                       "triangle_exclamation", Lang::Sounds::OGG_EXCLAMATION);
                 vTaskDelay(pdMS_TO_TICKS(10000));
                 continue;
             }
+            activation_bind_ui_shown = true;
+            activation_status_ui_shown = true;
 
             const TickType_t now = xTaskGetTickCount();
             const bool should_play_sound =
@@ -1787,6 +1863,16 @@ void Application::CheckNewVersion() {
         }
 
         // 尝试激活设备
+        std::string activation_message = ota_->GetActivationMessage();
+        if (activation_message.empty()) {
+            activation_message = Lang::Strings::PLEASE_WAIT;
+        }
+        if (!activation_status_ui_shown || activation_message != last_activation_status_message) {
+            ShowActivationStatus(activation_message, "microchip_ai");
+            activation_status_ui_shown = true;
+            last_activation_status_message = activation_message;
+        }
+
         for (int i = 0; i < 10; ++i) {
             esp_err_t err = ota_->Activate();
             if (err == ESP_OK) {
@@ -1827,6 +1913,14 @@ void Application::ShowActivationCode(const std::string& code, const std::string&
           play_sound ? Lang::Sounds::OGG_ACTIVATION : std::string_view{});
 }
 
+void Application::ShowActivationStatus(const std::string& message, const char* emotion) {
+    auto display = Board::GetInstance().GetDisplay();
+    const char* detail = message.empty() ? Lang::Strings::PLEASE_WAIT : message.c_str();
+    display->ShowPersistentNotification(Lang::Strings::ACTIVATION, true);
+    display->ShowPersistentNotification(detail, false);
+    Alert(Lang::Strings::ACTIVATION, detail, emotion);
+}
+
 void Application::Alert(const char* status, const char* message, const char* emotion,
                         const std::string_view& sound) {
     auto display = Board::GetInstance().GetDisplay();
@@ -1847,6 +1941,20 @@ void Application::DismissAlert() {
     }
 }
 
+void Application::ShowPendingIdleNotification(Display* display) {
+    if (display == nullptr || pending_idle_notification_.empty()) {
+        return;
+    }
+
+    const int duration_ms = pending_idle_notification_duration_ms_ > 0
+                                ? pending_idle_notification_duration_ms_
+                                : static_cast<int>(kAiChatConnectionErrorNoticeMs);
+    std::string notification = std::move(pending_idle_notification_);
+    pending_idle_notification_.clear();
+    pending_idle_notification_duration_ms_ = 0;
+    display->ShowNotification(notification.c_str(), duration_ms);
+}
+
 void Application::ToggleChatState() {
     xEventGroupSetBits(event_group_, MAIN_EVENT_TOGGLE_CHAT);
 }
@@ -1863,7 +1971,6 @@ void Application::HandleToggleChatEvent() {
     auto state = GetDeviceState();
 
     if (state == kDeviceStateActivating) {
-        SetDeviceState(kDeviceStateIdle);
         return;
     } else if (state == kDeviceStateWifiConfiguring) {
         audio_service_.EnableAudioTesting(true);
@@ -1912,7 +2019,6 @@ void Application::HandleStartListeningEvent() {
     auto state = GetDeviceState();
 
     if (state == kDeviceStateActivating) {
-        SetDeviceState(kDeviceStateIdle);
         return;
     } else if (state == kDeviceStateWifiConfiguring) {
         audio_service_.EnableAudioTesting(true);
@@ -1993,8 +2099,6 @@ void Application::HandleWakeWordDetectedEvent() {
             play_popup_on_listening_ = true;
             SetListeningMode(GetDefaultListeningMode());
         }
-    } else if (state == kDeviceStateActivating) {
-        SetDeviceState(kDeviceStateIdle);
     }
 }
 
@@ -2105,6 +2209,7 @@ void Application::HandleStateChangedEvent() {
                 display->ClearChatMessages();
             }
             display->SetEmotion("neutral");
+            ShowPendingIdleNotification(display);
 #if HAVE_LVGL
             if (lcd_display != nullptr) {
                 lcd_display->SetEmojiVisible(false);
@@ -2178,6 +2283,7 @@ void Application::HandleStateChangedEvent() {
             audio_service_.ResetDecoder();
             break;
         case kDeviceStateWifiConfiguring:
+        case kDeviceStateActivating:
 #if HAVE_LVGL
             if (lcd_display != nullptr) {
                 lcd_display->SetEmojiVisible(false);
@@ -2368,17 +2474,17 @@ void Application::HandleMqttCommand(const char* json, int len) {
             protocol_generation_.fetch_add(1);
             protocol_.reset();
             MqttControl::GetInstance().StopForNetworkSwitch();
+            SetDeviceState(kDeviceStateActivating);
 
             auto& board = Board::GetInstance();
-            if (!board.EnterBleBindMode()) {
-                Alert(Lang::Strings::ERROR, Lang::Strings::BLUFI_INIT_FAILED,
-                      "triangle_exclamation", Lang::Sounds::OGG_EXCLAMATION);
-                return;
-            }
-
             bool expected = false;
             if (!g_ble_bind_wait_in_progress.compare_exchange_strong(expected, true)) {
                 return;
+            }
+
+            if (!board.EnterBleBindMode()) {
+                Alert(Lang::Strings::ERROR, Lang::Strings::BLUFI_INIT_FAILED,
+                      "triangle_exclamation", Lang::Sounds::OGG_EXCLAMATION);
             }
 
             PlaySound(Lang::Sounds::OGG_ACTIVATION);
@@ -2393,11 +2499,20 @@ void Application::HandleMqttCommand(const char* json, int len) {
                         auto* app = ctx->app;
                         delete ctx;
 
-                        for (int attempt = 0; attempt < kBleBindPollMaxAttempts; ++attempt) {
+                        int attempt = 0;
+                        while (app->GetDeviceState() == kDeviceStateActivating) {
                             auto& board = Board::GetInstance();
                             if (!board.IsBleBindModeActive()) {
-                                board.ExitBleBindMode();
-                                break;
+                                if (!board.EnterBleBindMode()) {
+                                    app->Schedule([app]() {
+                                        app->Alert(Lang::Strings::ERROR,
+                                                   Lang::Strings::BLUFI_INIT_FAILED,
+                                                   "triangle_exclamation",
+                                                   Lang::Sounds::OGG_EXCLAMATION);
+                                    });
+                                    vTaskDelay(pdMS_TO_TICKS(10000));
+                                    continue;
+                                }
                             }
 
                             Ota ota;
@@ -2405,6 +2520,21 @@ void Application::HandleMqttCommand(const char* json, int len) {
                                 !ota.HasActivationCode() && !ota.HasActivationChallenge()) {
                                 app->HandleRebindSuccess();
                                 break;
+                            }
+                            ++attempt;
+                            if (attempt % kBleBindTimeoutNotifyAttempts == 0) {
+                                std::string notice = BuildBleBindTimeoutNotice();
+                                app->Schedule([notice = std::move(notice)]() {
+                                    auto display = Board::GetInstance().GetDisplay();
+                                    display->ShowNotification(notice.c_str(),
+                                                              kBleBindTimeoutNoticeMs);
+                                });
+                                vTaskDelay(pdMS_TO_TICKS(kBleBindTimeoutNoticeMs));
+                                app->Schedule([app]() {
+                                    if (app->GetDeviceState() == kDeviceStateActivating) {
+                                        Board::GetInstance().EnterBleBindMode();
+                                    }
+                                });
                             }
                             vTaskDelay(pdMS_TO_TICKS(kBleBindPollIntervalMs));
                         }
@@ -2943,6 +3073,8 @@ void Application::HandleRebindSuccess() {
     Schedule([this]() {
         auto& board = Board::GetInstance();
         board.ExitBleBindMode();
+        startup_activation_completed_ = true;
+        SetDeviceState(kDeviceStateIdle);
         auto display = board.GetDisplay();
         display->HideActivationQrCode();
         audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);

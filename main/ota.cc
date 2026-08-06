@@ -161,12 +161,14 @@ esp_err_t Ota::CheckVersion() {
     if (!http->Open(method, url)) {
         int last_error = http->GetLastError();
         ESP_LOGE(TAG, "Failed to open HTTP connection: %d", last_error);
+        http->Close();
         return last_error;
     }
 
     auto status_code = http->GetStatusCode();
     if (status_code != 200) {
         ESP_LOGE(TAG, "HTTP request failed with status: %d", status_code);
+        http->Close();
         return status_code;
     }
 
@@ -758,18 +760,23 @@ esp_err_t Ota::Activate() {
 
     if (!http->Open("POST", url)) {
         ESP_LOGE(TAG, "Failed to open activation URL: %s", url.c_str());
+        http->Close();
         return ESP_FAIL;
     }
 
     auto status_code = http->GetStatusCode();
     if (status_code == 202) {
+        http->Close();
         return ESP_ERR_TIMEOUT;
     }
     
     if (status_code != 200) {
         ESP_LOGE(TAG, "Activation failed with status: %d", status_code);
+        http->Close();
         return ESP_FAIL;
     }
+
+    http->Close();
 
     return ESP_OK;
 }

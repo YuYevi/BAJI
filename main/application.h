@@ -132,6 +132,8 @@ private:
     TaskHandle_t activation_task_handle_ = nullptr;
     TaskHandle_t reboot_task_handle_ = nullptr;
     std::string idle_assistant_message_;
+    std::string pending_idle_notification_;
+    int pending_idle_notification_duration_ms_ = 0;
 
     void HandleStateChangedEvent();
     void HandleToggleChatEvent();
@@ -143,12 +145,14 @@ private:
     void HandleWakeWordDetectedEvent();
     void ContinueOpenAudioChannel(ListeningMode mode);
     void ContinueWakeWordInvoke(const std::string& wake_word);
+    void ShowPendingIdleNotification(Display* display);
 
     void ActivationTask();
 
     void CheckAssetsVersion();
     void CheckNewVersion();
     void InitializeProtocol();
+    void ShowActivationStatus(const std::string& message, const char* emotion);
     void RestartProtocolFromSettings();
     void SetupProtocolCallbacks(Display* display, AudioCodec* codec, Board& board,
                                 uint32_t generation);

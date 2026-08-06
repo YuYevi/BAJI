@@ -47,6 +47,7 @@ extern "C" void baji_lcd_te_attach_display(lv_display_t* display) __attribute__(
 namespace {
 bool ShouldEnterSmartWatchAiChat(DeviceState state) {
     return state == kDeviceStateConnecting ||
+           state == kDeviceStateActivating ||
            state == kDeviceStateListening ||
            state == kDeviceStateSpeaking;
 }
