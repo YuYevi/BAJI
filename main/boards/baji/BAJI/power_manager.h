@@ -1,14 +1,20 @@
 #pragma once
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <vector>
 #include <functional>
 
 #include <esp_timer.h>
 #include <driver/gpio.h>
 #include <esp_adc/adc_oneshot.h>
+#include <esp_adc/adc_cali.h>
+#include <esp_adc/adc_cali_scheme.h>
 #include "sdkconfig.h"
 #include "button.h"
 #include "board.h"
 #include "config.h"
+#include "settings.h"
 #include "charging_boot_rtc.h"
 #include "assets/lang_config.h"
 #include "abnormal_reporter.h"
@@ -32,29 +38,60 @@ private:
     std::function<void(bool)> on_low_battery_status_changed_;
 
     gpio_num_t charging_pin_ = GPIO_NUM_NC;
-    std::vector<uint16_t> adc_values_;
-    uint32_t battery_level_ = 30;
+    std::vector<uint16_t> battery_mv_samples_;
+    uint8_t battery_level_ = 30;
+    uint8_t measured_battery_level_ = 30;
+    uint8_t persisted_battery_level_ = 30;
     bool is_charging_ = false;
     bool is_low_battery_ = false;
     bool is_first_battery_read_ = true;
+    bool battery_state_loaded_ = false;
     int ticks_ = 0;
-    uint16_t last_average_adc_ = 0;
+    int last_average_battery_mv_ = 0;
     uint16_t charge_state_settle_seconds_ = 0;
     uint16_t battery_level_step_seconds_ = 0;
     uint16_t near_full_charge_seconds_ = 0;
     uint16_t charge_state_debounce_seconds_ = 0;
+    uint16_t battery_persist_seconds_ = 0;
     adc_oneshot_unit_handle_t adc_handle_ = nullptr;
-    const int kBatteryAdcInterval = 30; 
-    const int kBatteryAdcDataCount = 10;
-    const int kLowBatteryLevel = 20;
-    const int kLowBatteryRecoverLevel = 25;
-    const int kChargeStateSettleTime = 12;
-    const int kChargeStateDebounceTime = 2;
-    const int kChargingLevelStepInterval = 12;
-    const int kDischargingLevelStepInterval = 20;
-    const int kNearFullAdcThreshold = 2380;
-    const int kNearFullChargeTime = 180;
-    const int kNearFullLevel = 95;
+    adc_cali_handle_t adc_cali_handle_ = nullptr;
+    enum class AdcCaliScheme {
+        None,
+        CurveFitting,
+        LineFitting,
+    };
+    AdcCaliScheme adc_cali_scheme_ = AdcCaliScheme::None;
+    bool adc_calibration_ready_ = false;
+
+    struct BatteryPoint {
+        uint16_t mv;
+        uint8_t level;
+    };
+
+    inline static constexpr std::array<BatteryPoint, 21> kBatteryCurve = {{
+        {4177, 100}, {4129, 95}, {4086, 90}, {4045, 85}, {4008, 80},
+        {3975, 75},  {3945, 70}, {3918, 65}, {3884, 60}, {3841, 55},
+        {3821, 50},  {3806, 45}, {3793, 40}, {3784, 35}, {3775, 30},
+        {3762, 25},  {3741, 20}, {3710, 15}, {3687, 10}, {3675, 5},
+        {3306, 0},
+    }};
+
+    static constexpr int kBatteryAdcInterval = 1;
+    static constexpr int kBatteryAdcDataCount = 10;
+    static constexpr int kBatteryAdcSampleCount = 7;
+    static constexpr int kBatteryAdcTrimCount = 1;
+    static constexpr int kBatteryFallbackFullScaleMv = 3900;
+    static constexpr float kBatteryDividerRatio = 2.0f;  // R8=200k, R13=200k in the BAJI netlist.
+    static constexpr int kBatteryPersistIntervalSeconds = 180;
+    static constexpr int kLowBatteryLevel = 20;
+    static constexpr int kLowBatteryRecoverLevel = 25;
+    static constexpr int kChargeStateSettleTime = 20;
+    static constexpr int kChargeStateDebounceTime = 2;
+    static constexpr int kChargingLevelStepInterval = 12;
+    static constexpr int kDischargingLevelStepInterval = 20;
+    static constexpr int kNearFullBatteryMv = 4130;
+    static constexpr int kNearFullChargeTime = 180;
+    static constexpr int kNearFullLevel = 95;
 
     bool new_charging_status = false;
     bool pending_charging_status_ = false;
@@ -226,6 +263,222 @@ private:
         }
     }
 
+    bool InitAdcCalibration(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten) {
+        adc_cali_handle_ = nullptr;
+        adc_cali_scheme_ = AdcCaliScheme::None;
+
+        esp_err_t ret = ESP_FAIL;
+        bool calibrated = false;
+
+#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+        if (!calibrated) {
+            adc_cali_curve_fitting_config_t cali_config = {
+                .unit_id = unit,
+                .chan = channel,
+                .atten = atten,
+                .bitwidth = ADC_BITWIDTH_12,
+            };
+            ret = adc_cali_create_scheme_curve_fitting(&cali_config, &adc_cali_handle_);
+            if (ret == ESP_OK) {
+                adc_cali_scheme_ = AdcCaliScheme::CurveFitting;
+                calibrated = true;
+            }
+        }
+#endif
+
+#if ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
+        if (!calibrated) {
+            adc_cali_line_fitting_config_t cali_config = {
+                .unit_id = unit,
+                .atten = atten,
+                .bitwidth = ADC_BITWIDTH_12,
+            };
+            ret = adc_cali_create_scheme_line_fitting(&cali_config, &adc_cali_handle_);
+            if (ret == ESP_OK) {
+                adc_cali_scheme_ = AdcCaliScheme::LineFitting;
+                calibrated = true;
+            }
+        }
+#endif
+
+        adc_calibration_ready_ = calibrated;
+        if (!calibrated) {
+            adc_cali_handle_ = nullptr;
+            adc_cali_scheme_ = AdcCaliScheme::None;
+            ESP_LOGW("PowerManager", "ADC calibration unavailable, using fallback conversion");
+        }
+        return calibrated;
+    }
+
+    void DeinitAdcCalibration() {
+        if (adc_cali_handle_ == nullptr) {
+            return;
+        }
+
+        if (adc_cali_scheme_ == AdcCaliScheme::CurveFitting) {
+#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+            ESP_ERROR_CHECK(adc_cali_delete_scheme_curve_fitting(adc_cali_handle_));
+#endif
+        } else if (adc_cali_scheme_ == AdcCaliScheme::LineFitting) {
+#if ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
+            ESP_ERROR_CHECK(adc_cali_delete_scheme_line_fitting(adc_cali_handle_));
+#endif
+        }
+        adc_cali_handle_ = nullptr;
+        adc_cali_scheme_ = AdcCaliScheme::None;
+        adc_calibration_ready_ = false;
+    }
+
+    bool ConvertRawToMillivolts(int raw, int& voltage_mv) {
+        if (adc_cali_handle_ != nullptr && adc_calibration_ready_) {
+            esp_err_t ret = adc_cali_raw_to_voltage(adc_cali_handle_, raw, &voltage_mv);
+            if (ret == ESP_OK) {
+                return true;
+            }
+            ESP_LOGW("PowerManager", "ADC calibration conversion failed: %s", esp_err_to_name(ret));
+        }
+
+        voltage_mv = (raw * kBatteryFallbackFullScaleMv) / 4095;
+        return true;
+    }
+
+    bool ReadBatteryVoltageMv(int& battery_mv) {
+        std::array<int, kBatteryAdcSampleCount> samples {};
+        int sample_count = 0;
+
+        for (int i = 0; i < kBatteryAdcSampleCount; ++i) {
+            int raw = 0;
+            if (!ReadAdcChannel(POWER_BATTERY_ADC_CHANNEL, raw)) {
+                return false;
+            }
+
+            int pin_mv = 0;
+            if (!ConvertRawToMillivolts(raw, pin_mv)) {
+                return false;
+            }
+
+            samples[sample_count++] = pin_mv;
+            if (i + 1 < kBatteryAdcSampleCount) {
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
+        }
+
+        std::sort(samples.begin(), samples.begin() + sample_count);
+
+        int start = 0;
+        int end = sample_count;
+        if (sample_count > (kBatteryAdcTrimCount * 2)) {
+            start = kBatteryAdcTrimCount;
+            end = sample_count - kBatteryAdcTrimCount;
+        }
+
+        int pin_mv_sum = 0;
+        int pin_mv_count = 0;
+        for (int i = start; i < end; ++i) {
+            pin_mv_sum += samples[i];
+            pin_mv_count++;
+        }
+
+        if (pin_mv_count == 0) {
+            return false;
+        }
+
+        const int pin_mv = (pin_mv_sum + (pin_mv_count / 2)) / pin_mv_count;
+        battery_mv = static_cast<int>(std::lround(static_cast<double>(pin_mv) * kBatteryDividerRatio));
+        return true;
+    }
+
+    uint8_t EstimateBatteryLevelFromVoltage(int battery_mv) const {
+        if (battery_mv >= kBatteryCurve.front().mv) {
+            return 100;
+        }
+        if (battery_mv <= kBatteryCurve.back().mv) {
+            return 0;
+        }
+
+        for (size_t i = 0; i + 1 < kBatteryCurve.size(); ++i) {
+            const BatteryPoint& upper = kBatteryCurve[i];
+            const BatteryPoint& lower = kBatteryCurve[i + 1];
+            if (battery_mv <= upper.mv && battery_mv >= lower.mv) {
+                const float span = static_cast<float>(upper.mv - lower.mv);
+                const float ratio = span > 0.0f
+                    ? static_cast<float>(battery_mv - lower.mv) / span
+                    : 0.0f;
+                const float level = lower.level + ratio * (upper.level - lower.level);
+                return static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(level)), 0, 100));
+            }
+        }
+
+        return 0;
+    }
+
+    void LoadBatteryState() {
+        Settings settings("batt");
+        if (!settings.GetBool("ok", false)) {
+            battery_state_loaded_ = false;
+            return;
+        }
+
+        int saved_level = settings.GetInt("lv", battery_level_);
+        saved_level = std::clamp(saved_level, 0, 100);
+        persisted_battery_level_ = static_cast<uint8_t>(saved_level);
+        battery_level_ = persisted_battery_level_;
+        measured_battery_level_ = persisted_battery_level_;
+        battery_state_loaded_ = true;
+        is_first_battery_read_ = false;
+    }
+
+    void PersistBatteryState(bool force = false) {
+        if (is_first_battery_read_ && !battery_state_loaded_) {
+            return;
+        }
+
+        if (!force && battery_state_loaded_ && battery_level_ == persisted_battery_level_) {
+            return;
+        }
+
+        if (!force && battery_persist_seconds_ < kBatteryPersistIntervalSeconds) {
+            return;
+        }
+
+        Settings settings("batt", true);
+        settings.SetBool("ok", true);
+        settings.SetInt("lv", battery_level_);
+        settings.SetInt("mv", last_average_battery_mv_);
+
+        persisted_battery_level_ = battery_level_;
+        battery_state_loaded_ = true;
+        battery_persist_seconds_ = 0;
+    }
+
+    void UpdateLowBatteryStatus() {
+        if (is_charging_) {
+            if (is_low_battery_) {
+                is_low_battery_ = false;
+                if (on_low_battery_status_changed_) {
+                    on_low_battery_status_changed_(false);
+                }
+            }
+            return;
+        }
+
+        if (battery_mv_samples_.size() < kBatteryAdcDataCount) {
+            return;
+        }
+
+        bool new_low_battery_status = false;
+        new_low_battery_status = is_low_battery_
+            ? measured_battery_level_ < kLowBatteryRecoverLevel
+            : measured_battery_level_ <= kLowBatteryLevel;
+
+        if (new_low_battery_status != is_low_battery_) {
+            is_low_battery_ = new_low_battery_status;
+            if (on_low_battery_status_changed_) {
+                on_low_battery_status_changed_(is_low_battery_);
+            }
+        }
+    }
+
     bool ReadAdcChannel(adc_channel_t channel, int& adc_value) {
         if (adc_handle_ == nullptr) {
             ESP_LOGW("PowerManager", "ADC handle is not ready");
@@ -260,12 +513,14 @@ private:
         new_charging_status = charging;
         pending_charging_status_ = charging;
         charge_state_debounce_seconds_ = 0;
-        adc_values_.clear();
+        battery_mv_samples_.clear();
         ticks_ = 0;
         charge_state_settle_seconds_ = kChargeStateSettleTime;
         battery_level_step_seconds_ = 0;
         near_full_charge_seconds_ = 0;
+        battery_persist_seconds_ = 0;
         ReadBatteryAdcData();
+        PersistBatteryState(true);
         if (on_charging_status_changed_) {
             on_charging_status_changed_(is_charging_);
         }
@@ -299,13 +554,19 @@ private:
             return;
         }
 
+        if (charge_state_settle_seconds_ > 0) {
+            charge_state_settle_seconds_--;
+            ReadBatteryAdcData();
+            return;
+        }
+
         if (battery_level_step_seconds_ < 0xFFFF) {
             battery_level_step_seconds_++;
         }
 
         if (is_charging_ &&
-            battery_level_ >= kNearFullLevel &&
-            last_average_adc_ >= kNearFullAdcThreshold) {
+            measured_battery_level_ >= kNearFullLevel &&
+            last_average_battery_mv_ >= kNearFullBatteryMv) {
             if (near_full_charge_seconds_ < 0xFFFF) {
                 near_full_charge_seconds_++;
             }
@@ -313,103 +574,61 @@ private:
             near_full_charge_seconds_ = 0;
         }
 
-        if (charge_state_settle_seconds_ > 0) {
-            charge_state_settle_seconds_--;
-            ReadBatteryAdcData();
-            return;
-        }
-
-        
-        if (adc_values_.size() < kBatteryAdcDataCount) {
-            ReadBatteryAdcData();
-            return;
-        }
-
-        
         ticks_++;
         if (ticks_ % kBatteryAdcInterval == 0) {
             ReadBatteryAdcData();
         }
+
+        if (battery_persist_seconds_ < 0xFFFF) {
+            battery_persist_seconds_++;
+        }
+        PersistBatteryState();
     }
 
     void ReadBatteryAdcData() {
-        int adc_value;
-        if (!ReadAdcChannel(POWER_BATTERY_ADC_CHANNEL, adc_value)) {
+        int battery_mv = 0;
+        if (!ReadBatteryVoltageMv(battery_mv)) {
             return;
         }
 
-        
-        adc_values_.push_back(adc_value);
-        if (adc_values_.size() > kBatteryAdcDataCount) {
-            adc_values_.erase(adc_values_.begin());
+        battery_mv = std::clamp(battery_mv, 0, 0xFFFF);
+        battery_mv_samples_.push_back(static_cast<uint16_t>(battery_mv));
+        if (battery_mv_samples_.size() > kBatteryAdcDataCount) {
+            battery_mv_samples_.erase(battery_mv_samples_.begin());
         }
-        uint32_t average_adc = 0;
-        for (auto value : adc_values_) {
-            average_adc += value;
+        uint32_t average_battery_mv = 0;
+        for (auto value : battery_mv_samples_) {
+            average_battery_mv += value;
         }
-        average_adc /= adc_values_.size();
-        last_average_adc_ = average_adc;
+        average_battery_mv /= battery_mv_samples_.size();
+        last_average_battery_mv_ = static_cast<int>(average_battery_mv);
 
-        
-        const struct {
-            uint16_t adc;
-            uint8_t level;
-        } levels[] = {
-            {1970, 0},   
-            {2000, 5},   
-            {2050, 15},  
-            {2100, 30},  
-            {2150, 45},  
-            {2200, 60},  
-            {2250, 72},  
-            {2300, 82},  
-            {2350, 90},  
-            {2380, 96},  
-            {2400, 100}  
-        };
-
-        uint8_t new_battery_level = battery_level_;
-        
-        if (average_adc < levels[0].adc) {
-            new_battery_level = 0;
-        } else if (average_adc >= levels[10].adc) {
-            new_battery_level = 100;
-        } else {
-            for (int i = 0; i < 10; i++) {
-                if (average_adc >= levels[i].adc && average_adc < levels[i+1].adc) {
-                    float ratio = static_cast<float>(average_adc - levels[i].adc) / (levels[i+1].adc - levels[i].adc);
-                    new_battery_level = levels[i].level + ratio * (levels[i+1].level - levels[i].level);
-                    break;
-                }
-            }
-        }
-
+        measured_battery_level_ = EstimateBatteryLevelFromVoltage(last_average_battery_mv_);
         if (is_charging_ &&
-            new_battery_level >= kNearFullLevel &&
-            average_adc >= kNearFullAdcThreshold &&
+            measured_battery_level_ >= kNearFullLevel &&
+            last_average_battery_mv_ >= kNearFullBatteryMv &&
             near_full_charge_seconds_ >= kNearFullChargeTime) {
-            new_battery_level = 100;
+            measured_battery_level_ = 100;
         }
 
         if (is_first_battery_read_) {
             is_first_battery_read_ = false;
-            battery_level_ = new_battery_level;
+            battery_level_ = measured_battery_level_;
+            PersistBatteryState(true);
         } else if (charge_state_settle_seconds_ == 0) {
             if (is_charging_) {
-                if (new_battery_level > battery_level_) {
-                    if (new_battery_level == 100 && near_full_charge_seconds_ >= kNearFullChargeTime) {
-                        battery_level_ = 100;
-                    } else if (battery_level_step_seconds_ >= kChargingLevelStepInterval) {
-                        battery_level_ += 1;
+                if (measured_battery_level_ > battery_level_) {
+                    if (battery_level_step_seconds_ >= kChargingLevelStepInterval) {
+                        battery_level_ = static_cast<uint8_t>(std::min<int>(battery_level_ + 1, measured_battery_level_));
                         battery_level_step_seconds_ = 0;
                     }
                 } else {
                     battery_level_step_seconds_ = 0;
                 }
             } else {
-                if (new_battery_level < battery_level_) {
+                if (measured_battery_level_ < battery_level_) {
                     if (battery_level_step_seconds_ >= kDischargingLevelStepInterval) {
-                        battery_level_ -= 1;
+                        battery_level_ = static_cast<uint8_t>(std::max<int>(battery_level_ - 1, measured_battery_level_));
                         battery_level_step_seconds_ = 0;
                     }
                 } else {
@@ -418,20 +637,7 @@ private:
             }
         }
 
-        
-        if (adc_values_.size() >= kBatteryAdcDataCount) {
-            bool new_low_battery_status = is_low_battery_
-                ? battery_level_ < kLowBatteryRecoverLevel
-                : battery_level_ <= kLowBatteryLevel;
-            if (new_low_battery_status != is_low_battery_) {
-                is_low_battery_ = new_low_battery_status;
-                if (on_low_battery_status_changed_) {
-                    on_low_battery_status_changed_(is_low_battery_);
-                }
-            }
-        }
-
-        
+        UpdateLowBatteryStatus();
     }
 
     static void ShutdownTask(void* arg) {
@@ -464,6 +670,7 @@ private:
         AbnormalReporter::MarkExpectedReset("poweroff");
         // Try to publish the MQTT offline status before board power is cut.
         MqttControl::GetInstance().Stop();
+        PersistBatteryState(true);
 
 #if POWER_CHARGE_DETECT_USE_GPIO
         if (gpio_get_level(charging_pin_) == POWER_USB_VBUS_ACTIVE_LEVEL) {
@@ -592,6 +799,8 @@ public:
             .bitwidth = ADC_BITWIDTH_12,
         };
         ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle_, POWER_BATTERY_ADC_CHANNEL, &chan_config));
+        InitAdcCalibration(POWER_CBS_ADC_UNIT, POWER_BATTERY_ADC_CHANNEL, ADC_ATTEN_DB_12);
+        battery_mv_samples_.reserve(kBatteryAdcDataCount);
 #if !POWER_CHARGE_DETECT_USE_GPIO
         ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle_, POWER_USBIN_ADC_CHANNEL, &chan_config));
 #endif
@@ -602,6 +811,7 @@ public:
             new_charging_status = initial_charging_status;
             pending_charging_status_ = initial_charging_status;
         }
+        LoadBatteryState();
         ReadBatteryAdcData();
 
         esp_timer_create_args_t timer_args = {
@@ -619,6 +829,8 @@ public:
     }
 
     ~PowerManager() {
+        PersistBatteryState(true);
+        DeinitAdcCalibration();
         if (timer_handle_) {
             esp_timer_stop(timer_handle_);
             esp_timer_delete(timer_handle_);
