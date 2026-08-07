@@ -171,6 +171,8 @@ static cJSON* BuildMqttDeviceInfoResult() {
     };
     cJSON_AddNumberToObject(root, "version", 2);
     cJSON_AddStringToObject(root, "language", Lang::CODE);
+    cJSON_AddStringToObject(root, "role", board.GetDeviceRole().c_str());
+    cJSON_AddStringToObject(root, "network_version", board.GetDeviceNetworkVersion().c_str());
     cJSON_AddNumberToObject(root, "flash_size", static_cast<double>(SystemInfo::GetFlashSize()));
     cJSON_AddNumberToObject(root, "flash_used_size",
                             static_cast<double>(SystemInfo::GetFlashUsedSize()));
@@ -2339,6 +2341,8 @@ void Application::PublishMqttTelemetry() {
     }
     cJSON_AddStringToObject(root, "deviceId", SystemInfo::GetMacAddress().c_str());
     cJSON_AddStringToObject(root, "state", DeviceStateToMqttString(GetDeviceState()));
+    cJSON_AddStringToObject(root, "role", board.GetDeviceRole().c_str());
+    cJSON_AddStringToObject(root, "network_version", board.GetDeviceNetworkVersion().c_str());
     cJSON_AddNumberToObject(root, "timestamp", static_cast<double>(time(nullptr)));
 
     // 添加背光亮度信息

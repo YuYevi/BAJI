@@ -1,6 +1,7 @@
 #include "board.h"
 #include "system_info.h"
 #include "settings.h"
+#include "remote_mjpeg_store.h"
 #include "display/display.h"
 #include "display/oled_display.h"
 #include "assets/lang_config.h"
@@ -12,6 +13,28 @@
 #include <esp_system.h>
 
 #include <cstdio>
+
+namespace {
+
+bool IsValidRoleCode(const std::string& role) {
+    static const char* kAllowedRoles[] = {
+        "MJQ", "DCX", "SYX", "LYW", "ZZY", "YHX", "HJL",
+    };
+
+    for (const char* allowed : kAllowedRoles) {
+        if (role == allowed) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string GetRemoteRoleCode() {
+    std::string role = RemoteMjpegStore::GetInstance().GetRoleId();
+    return IsValidRoleCode(role) ? role : "";
+}
+
+}  // namespace
 
 Board::Board() {
     Settings settings("board", true);
@@ -78,9 +101,19 @@ Led* Board::GetLed() {
     return &led;
 }
 
+std::string Board::GetDeviceRole() {
+    return GetRemoteRoleCode();
+}
+
+std::string Board::GetDeviceNetworkVersion() {
+    return "WIFI";
+}
+
 std::string Board::GetSystemInfoJson() {
     
     std::string json = R"({"version":2,"language":")" + std::string(Lang::CODE) + R"(",)";
+    json += R"("role":")" + GetDeviceRole() + R"(",)";
+    json += R"("network_version":")" + GetDeviceNetworkVersion() + R"(",)";
     json += R"("flash_size":)" + std::to_string(SystemInfo::GetFlashSize()) + R"(,)";
     json += R"("psram_total_size":)" + std::to_string(SystemInfo::GetPsramTotalSize()) + R"(,)";
     json += R"("psram_used_size":)" + std::to_string(SystemInfo::GetPsramUsedSize()) + R"(,)";

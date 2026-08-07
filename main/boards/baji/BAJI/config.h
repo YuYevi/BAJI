@@ -116,6 +116,14 @@
 #define ML307_EDRX_VALUE                "0011"          // EDRX值
 
 /*
+ * OTA identity fields
+ * role: MJQ / DCX / SYX / LYW / ZZY / YHX / HJL
+ * network_version: WIFI / 4G
+ */
+#define BAJI_OTA_ROLE                   ""
+#define BAJI_OTA_NETWORK_VERSION        "4G"
+
+/*
  * 显示配置
  */
 #define DISPLAY_WIDTH                   360     // 显示宽度

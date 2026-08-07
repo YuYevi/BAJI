@@ -1524,6 +1524,23 @@ public:
         InitializeButtons();
     }
 
+    std::string GetDeviceRole() override {
+        const std::string role = BAJI_OTA_ROLE;
+        if (!role.empty()) {
+            return (role == "MJQ" || role == "DCX" || role == "SYX" || role == "LYW" ||
+                    role == "ZZY" || role == "YHX" || role == "HJL")
+                       ? role
+                       : "";
+        }
+        return Board::GetDeviceRole();
+    }
+
+    std::string GetDeviceNetworkVersion() override {
+        const std::string network_version = BAJI_OTA_NETWORK_VERSION;
+        return (network_version == "4G" || network_version == "WIFI") ? network_version
+                                                                        : "WIFI";
+    }
+
     /**
      * @brief 获取音频编解码器
      * 
