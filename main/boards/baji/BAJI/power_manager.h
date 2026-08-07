@@ -358,9 +358,6 @@ private:
             }
 
             samples[sample_count++] = pin_mv;
-            if (i + 1 < kBatteryAdcSampleCount) {
-                vTaskDelay(pdMS_TO_TICKS(1));
-            }
         }
 
         std::sort(samples.begin(), samples.begin() + sample_count);

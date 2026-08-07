@@ -32,6 +32,7 @@
 #include <esp_lvgl_port.h>
 #include <lvgl.h>
 #include <wifi_manager.h>
+#include <ssid_manager.h>
 
 #include "config.h"
 #include "settings.h"
@@ -622,6 +623,7 @@ private:
     TaskHandle_t fourg_boot_task_ = nullptr;     ///< 4G启动任务句柄
     TaskHandle_t net_switch_task_ = nullptr;     ///< 网络切换任务句柄
     TaskHandle_t wifi_reprovision_task_ = nullptr; ///< 重新配网任务句柄
+    TaskHandle_t fourg_recovery_task_ = nullptr; ///< 4G失败后回退WiFi任务句柄
     std::atomic<NetFlowState> net_flow_state_{NetFlowState::Idle}; ///< 网络流程保护状态
 
     /**
@@ -643,20 +645,22 @@ private:
     }
 
     bool IsNetFlowProtected() const {
-        return GetNetFlowState() != NetFlowState::Idle;
+        return GetNetFlowState() != NetFlowState::Idle ||
+               fourg_recovery_task_ != nullptr;
     }
 
     bool IsFlowMovingAwayFrom(NetMode target) const {
         NetFlowState state = GetNetFlowState();
         if (target == NetMode::WIFI) {
             return state == NetFlowState::SwitchingTo4G ||
-                   state == NetFlowState::Connecting4G ||
-                   fourg_boot_task_ != nullptr;
+               state == NetFlowState::Connecting4G ||
+               fourg_boot_task_ != nullptr;
         }
         return state == NetFlowState::SwitchingToWifi ||
                state == NetFlowState::ConnectingWifi ||
                state == NetFlowState::WifiProvisioning ||
-               wifi_reprovision_task_ != nullptr;
+               wifi_reprovision_task_ != nullptr ||
+               fourg_recovery_task_ != nullptr;
     }
 
     static uint8_t ClampBrightnessPercent(int value) {
@@ -807,8 +811,80 @@ private:
         }
     }
 
+    bool HasSavedWifi() const {
+        return !SsidManager::GetInstance().GetSsidList().empty();
+    }
+
+    static bool Is4gRecoverableEvent(NetworkEvent event) {
+        switch (event) {
+            case NetworkEvent::Disconnected:
+            case NetworkEvent::ModemErrorNoSim:
+            case NetworkEvent::ModemErrorRegDenied:
+            case NetworkEvent::ModemErrorInitFailed:
+            case NetworkEvent::ModemErrorTimeout:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    bool CanRecover4gToWifi(NetworkEvent event) const {
+        return Is4gRecoverableEvent(event) &&
+               net_mode_ == NetMode::ML307 &&
+               HasSavedWifi() &&
+               net_switch_task_ == nullptr &&
+               wifi_reprovision_task_ == nullptr &&
+               fourg_recovery_task_ == nullptr;
+    }
+
+    void StartWifiRecoveryAfter4gFailure(NetworkEvent event) {
+        if (!CanRecover4gToWifi(event)) {
+            return;
+        }
+
+        struct RecoveryCtx {
+            CustomBoard* self;
+        };
+
+        auto* ctx = new RecoveryCtx{this};
+        const BaseType_t task_created = xTaskCreate([](void* arg) {
+            auto* ctx = static_cast<RecoveryCtx*>(arg);
+            auto self = ctx->self;
+            delete ctx;
+
+            (void)self->WaitFor4gBootTaskDone(15000);
+            self->SetNetFlowState(NetFlowState::SwitchingToWifi);
+            if (self->display_ != nullptr) {
+                self->display_->ShowNotification("4G连接失败，切回WiFi", 2000);
+            }
+
+            if (self->ml307_board_) {
+                self->ml307_board_->SetNetworkEventCallback(NetworkEventCallback{});
+            }
+
+            if (!self->Stop4gNow()) {
+                ESP_LOGW(TAG, "Fallback to Wi-Fi while 4G task is still stopping");
+            }
+
+            self->net_mode_ = NetMode::WIFI;
+            self->SetWifiAutoReconnectEnabled(true);
+            self->SetNetFlowState(NetFlowState::ConnectingWifi);
+            self->WifiBoard::StartNetwork();
+
+            self->fourg_recovery_task_ = nullptr;
+            vTaskDelete(nullptr);
+        }, "baji185_4g_recover", 6144, ctx, 5, &fourg_recovery_task_);
+
+        if (task_created != pdPASS) {
+            delete ctx;
+            fourg_recovery_task_ = nullptr;
+            ESP_LOGE(TAG, "Failed to create 4G recovery task");
+        }
+    }
+
     void HandleManagedNetworkEvent(NetworkEvent event, const std::string& data) {
         NetFlowState state = GetNetFlowState();
+        bool recover_to_wifi = false;
         switch (event) {
             case NetworkEvent::Connecting:
                 if (net_mode_ == NetMode::ML307 ||
@@ -823,6 +899,9 @@ private:
                 break;
             case NetworkEvent::Connected:
                 SetNetFlowState(NetFlowState::Idle);
+                if (net_mode_ == NetMode::ML307 && fourg_recovery_task_ == nullptr) {
+                    SavePreferredNetwork(NetMode::ML307);
+                }
                 break;
             case NetworkEvent::WifiConfigModeEnter:
                 SetNetFlowState(NetFlowState::WifiProvisioning);
@@ -841,15 +920,26 @@ private:
             case NetworkEvent::ModemErrorInitFailed:
             case NetworkEvent::ModemErrorTimeout:
                 SetNetFlowState(NetFlowState::Idle);
+                recover_to_wifi = true;
                 break;
             case NetworkEvent::Scanning:
+                break;
             case NetworkEvent::Disconnected:
+                if (net_mode_ == NetMode::ML307) {
+                    SetNetFlowState(NetFlowState::Idle);
+                    recover_to_wifi = true;
+                }
+                break;
             default:
                 break;
         }
 
         if (net_cb_) {
             net_cb_(event, data);
+        }
+
+        if (recover_to_wifi) {
+            StartWifiRecoveryAfter4gFailure(event);
         }
     }
 
@@ -986,15 +1076,20 @@ private:
     /**
      * @brief 立即停止4G网络
      */
-    void Stop4gNow() {
+    bool Stop4gNow() {
         MqttControl::GetInstance().StopForNetworkSwitch();
         if (ml307_board_) {
             ml307_board_->StopNetwork();
-            (void)ml307_board_->WaitUntilStopped(4000);
+            if (!ml307_board_->WaitUntilStopped(4000)) {
+                ESP_LOGW(TAG, "4G network task did not stop in time; keep board object alive");
+                ml307_board_->SetNetworkEventCallback(NetworkEventCallback{});
+                return false;
+            }
             ml307_board_.reset();
             vTaskDelay(pdMS_TO_TICKS(100));
         }
         TurnOff4GModule();
+        return true;
     }
 
     /**
@@ -1093,10 +1188,10 @@ private:
 
             if (!self->ml307_board_) {
                 self->ml307_board_ = std::make_unique<Ml307Board>(UART_4G_TXD, UART_4G_RXD, UART0_DTR);
-                self->ml307_board_->SetNetworkEventCallback([self](NetworkEvent event, const std::string& data) {
-                    self->HandleManagedNetworkEvent(event, data);
-                });
             }
+            self->ml307_board_->SetNetworkEventCallback([self](NetworkEvent event, const std::string& data) {
+                self->HandleManagedNetworkEvent(event, data);
+            });
 
             self->SetNetFlowState(NetFlowState::Connecting4G);
             self->ml307_board_->StartNetwork();
@@ -1161,7 +1256,6 @@ private:
                 self->SetWifiAutoReconnectEnabled(false);
                 self->StopWifiNow();
                 self->net_mode_ = NetMode::ML307;
-                self->SavePreferredNetwork(NetMode::ML307);
                 self->Start4gAsync(for_dialog_wake);
             } else {
                 if (!self->WaitFor4gBootTaskDone(15000)) {
@@ -1195,7 +1289,7 @@ private:
      * @return bool true=已受理切换请求，false=当前不可切换
      */
     bool RequestNetworkSwitch(NetMode target, bool for_dialog_wake = false, bool show_notification = true) {
-        if (net_switch_task_ != nullptr) {
+        if (net_switch_task_ != nullptr || fourg_recovery_task_ != nullptr) {
             if (show_notification) {
                 ShowNetFlowBusyNotification("网络忙，请稍后再试");
             }
@@ -1269,7 +1363,7 @@ private:
             return;
         }
 
-        if (net_switch_task_ != nullptr || wifi_reprovision_task_ != nullptr) {
+        if (net_switch_task_ != nullptr || wifi_reprovision_task_ != nullptr || fourg_recovery_task_ != nullptr) {
             ShowNetFlowBusyNotification("当前暂不允许进入配网");
             return;
         }
