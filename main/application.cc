@@ -49,6 +49,7 @@
 #include <vector>
 #include <string>
 #include <ctime>
+#include <new>
 
 #define TAG "Application"
 
@@ -2496,8 +2497,9 @@ void Application::HandleMqttCommand(const char* json, int len) {
             struct BleBindWaitTaskCtx {
                 Application* app;
             };
-            auto* ctx = new BleBindWaitTaskCtx{this};
-            if (xTaskCreate(
+            auto* ctx = new (std::nothrow) BleBindWaitTaskCtx{this};
+            if (ctx == nullptr ||
+                xTaskCreate(
                     [](void* arg) {
                         auto* ctx = static_cast<BleBindWaitTaskCtx*>(arg);
                         auto* app = ctx->app;
@@ -2648,19 +2650,24 @@ void Application::HandleMqttCommand(const char* json, int len) {
             if (!g_skin_download_in_progress.compare_exchange_strong(expected, true)) {
                 reason = "skin_update_in_progress";
             } else {
-                auto* payload = new SkinUpdateTaskPayload();
-                payload->app = this;
-                payload->parsed = std::move(parsed);
-                if (xTaskCreate(
-                        [](void* arg) {
-                            DownloadServerBackgroundTask(arg);
-                        },
-                        "mqtt_skin", 8192, payload, 5, nullptr) != pdPASS) {
-                    delete payload;
+                auto* payload = new (std::nothrow) SkinUpdateTaskPayload();
+                if (payload == nullptr) {
                     g_skin_download_in_progress.store(false);
-                    reason = "skin_update_task_create_failed";
+                    reason = "skin_update_task_alloc_failed";
                 } else {
-                    success = true;
+                    payload->app = this;
+                    payload->parsed = std::move(parsed);
+                    if (xTaskCreate(
+                            [](void* arg) {
+                                DownloadServerBackgroundTask(arg);
+                            },
+                            "mqtt_skin", 8192, payload, 5, nullptr) != pdPASS) {
+                        delete payload;
+                        g_skin_download_in_progress.store(false);
+                        reason = "skin_update_task_create_failed";
+                    } else {
+                        success = true;
+                    }
                 }
             }
         }
@@ -2677,19 +2684,24 @@ void Application::HandleMqttCommand(const char* json, int len) {
             if (!g_role_download_in_progress.compare_exchange_strong(expected, true)) {
                 reason = "switch_role_in_progress";
             } else {
-                auto* payload = new RoleSwitchTaskPayload();
-                payload->app = this;
-                payload->parsed = std::move(parsed);
-                if (xTaskCreate(
-                        [](void* arg) {
-                            DownloadRoleMjpegTask(arg);
-                        },
-                        "mqtt_role", 8192, payload, 5, nullptr) != pdPASS) {
-                    delete payload;
+                auto* payload = new (std::nothrow) RoleSwitchTaskPayload();
+                if (payload == nullptr) {
                     g_role_download_in_progress.store(false);
-                    reason = "switch_role_task_create_failed";
+                    reason = "switch_role_task_alloc_failed";
                 } else {
-                    success = true;
+                    payload->app = this;
+                    payload->parsed = std::move(parsed);
+                    if (xTaskCreate(
+                            [](void* arg) {
+                                DownloadRoleMjpegTask(arg);
+                            },
+                            "mqtt_role", 8192, payload, 5, nullptr) != pdPASS) {
+                        delete payload;
+                        g_role_download_in_progress.store(false);
+                        reason = "switch_role_task_create_failed";
+                    } else {
+                        success = true;
+                    }
                 }
             }
         }

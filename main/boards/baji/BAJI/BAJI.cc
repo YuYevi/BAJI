@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <string>
 #include <atomic>
+#include <new>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
@@ -815,6 +816,24 @@ private:
         return !SsidManager::GetInstance().GetSsidList().empty();
     }
 
+    void FallbackToWifiAfter4gStartFailure() {
+        ESP_LOGW(TAG, "Falling back to Wi-Fi after 4G start failed");
+        TurnOff4GModule();
+
+        if (!HasSavedWifi()) {
+            SetNetFlowState(NetFlowState::Idle);
+            return;
+        }
+
+        net_mode_ = NetMode::WIFI;
+        SetWifiAutoReconnectEnabled(true);
+        SetNetFlowState(NetFlowState::ConnectingWifi);
+        if (Application::GetInstance().IsOtaUpgradeInProgress()) {
+            Application::GetInstance().NotifyOtaNetworkSwitchRequested(BoardNetworkMode::WIFI);
+        }
+        WifiBoard::StartNetwork();
+    }
+
     static bool Is4gRecoverableEvent(NetworkEvent event) {
         switch (event) {
             case NetworkEvent::Disconnected:
@@ -846,7 +865,12 @@ private:
             CustomBoard* self;
         };
 
-        auto* ctx = new RecoveryCtx{this};
+        auto* ctx = new (std::nothrow) RecoveryCtx{this};
+        if (ctx == nullptr) {
+            fourg_recovery_task_ = nullptr;
+            ESP_LOGE(TAG, "Failed to allocate 4G recovery context");
+            return;
+        }
         const BaseType_t task_created = xTaskCreate([](void* arg) {
             auto* ctx = static_cast<RecoveryCtx*>(arg);
             auto self = ctx->self;
@@ -1161,9 +1185,9 @@ private:
      * 
      * @param for_dialog_wake 是否为对话唤醒启动
      */
-    void Start4gAsync(bool for_dialog_wake) {
+    bool Start4gAsync(bool for_dialog_wake) {
         if (fourg_boot_task_ != nullptr) {
-            return;
+            return true;
         }
 
         struct Start4gCtx {
@@ -1171,7 +1195,12 @@ private:
             bool for_dialog_wake;
         };
 
-        auto* ctx = new Start4gCtx{this, for_dialog_wake};
+        auto* ctx = new (std::nothrow) Start4gCtx{this, for_dialog_wake};
+        if (ctx == nullptr) {
+            SetNetFlowState(NetFlowState::Idle);
+            ESP_LOGE(TAG, "Failed to allocate 4G start context");
+            return false;
+        }
 
         auto task_entry = [](void* arg) {
             auto* ctx = static_cast<Start4gCtx*>(arg);
@@ -1187,7 +1216,15 @@ private:
             }
 
             if (!self->ml307_board_) {
-                self->ml307_board_ = std::make_unique<Ml307Board>(UART_4G_TXD, UART_4G_RXD, UART0_DTR);
+                self->ml307_board_.reset(
+                    new (std::nothrow) Ml307Board(UART_4G_TXD, UART_4G_RXD, UART0_DTR));
+                if (!self->ml307_board_) {
+                    ESP_LOGE(TAG, "Failed to allocate ML307 board");
+                    self->fourg_boot_task_ = nullptr;
+                    self->FallbackToWifiAfter4gStartFailure();
+                    vTaskDelete(nullptr);
+                    return;
+                }
             }
             self->ml307_board_->SetNetworkEventCallback([self](NetworkEvent event, const std::string& data) {
                 self->HandleManagedNetworkEvent(event, data);
@@ -1214,7 +1251,9 @@ private:
                          MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
                      static_cast<unsigned>(
                          heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
+            return false;
         }
+        return true;
     }
 
     /**
@@ -1223,9 +1262,9 @@ private:
      * @param target 目标网络模式
      * @param for_dialog_wake 是否为对话唤醒切换
      */
-    void SwitchNetworkRuntime(NetMode target, bool for_dialog_wake = false) {
+    bool SwitchNetworkRuntime(NetMode target, bool for_dialog_wake = false) {
         if (net_switch_task_ != nullptr) {
-            return;
+            return false;
         }
 
         struct SwitchCtx {
@@ -1234,7 +1273,11 @@ private:
             bool for_dialog_wake;
         };
 
-        auto* ctx = new SwitchCtx{this, target, for_dialog_wake};
+        auto* ctx = new (std::nothrow) SwitchCtx{this, target, for_dialog_wake};
+        if (ctx == nullptr) {
+            ESP_LOGE(TAG, "Failed to allocate network switch context");
+            return false;
+        }
 
         if (xTaskCreate([](void* arg) {
             auto* ctx = static_cast<SwitchCtx*>(arg);
@@ -1256,7 +1299,9 @@ private:
                 self->SetWifiAutoReconnectEnabled(false);
                 self->StopWifiNow();
                 self->net_mode_ = NetMode::ML307;
-                self->Start4gAsync(for_dialog_wake);
+                if (!self->Start4gAsync(for_dialog_wake)) {
+                    self->FallbackToWifiAfter4gStartFailure();
+                }
             } else {
                 if (!self->WaitFor4gBootTaskDone(15000)) {
                     self->SetNetFlowState(NetFlowState::Idle);
@@ -1277,7 +1322,9 @@ private:
             delete ctx;
             net_switch_task_ = nullptr;
             SetNetFlowState(NetFlowState::Idle);
+            return false;
         }
+        return true;
     }
 
     /**
@@ -1300,6 +1347,14 @@ private:
             return false;
         }
 
+        SetNetFlowState(target == NetMode::ML307
+            ? NetFlowState::SwitchingTo4G
+            : NetFlowState::SwitchingToWifi);
+        if (!SwitchNetworkRuntime(target, for_dialog_wake)) {
+            SetNetFlowState(NetFlowState::Idle);
+            return false;
+        }
+
         auto& app = Application::GetInstance();
         if (app.IsOtaUpgradeInProgress()) {
             app.NotifyOtaNetworkSwitchRequested(target == NetMode::ML307
@@ -1312,11 +1367,6 @@ private:
                 ? Lang::Strings::SWITCH_TO_4G_NETWORK
                 : Lang::Strings::SWITCH_TO_WIFI_NETWORK, 2000);
         }
-
-        SetNetFlowState(target == NetMode::ML307
-            ? NetFlowState::SwitchingTo4G
-            : NetFlowState::SwitchingToWifi);
-        SwitchNetworkRuntime(target, for_dialog_wake);
         return true;
     }
 
@@ -1374,7 +1424,12 @@ private:
             CustomBoard* self;
         };
 
-        auto* ctx = new ReprovisionCtx{this};
+        auto* ctx = new (std::nothrow) ReprovisionCtx{this};
+        if (ctx == nullptr) {
+            SetNetFlowState(NetFlowState::Idle);
+            ESP_LOGE(TAG, "Failed to allocate Wi-Fi reprovision context");
+            return;
+        }
         if (xTaskCreate([](void* arg) {
             auto* ctx = static_cast<ReprovisionCtx*>(arg);
             auto self = ctx->self;
@@ -1760,7 +1815,9 @@ public:
         net_mode_ = NetMode::ML307;
         SetNetFlowState(NetFlowState::Connecting4G);
         GetDisplay()->SetStatus("连接4G");
-        Start4gAsync(false);
+        if (!Start4gAsync(false)) {
+            FallbackToWifiAfter4gStartFailure();
+        }
     }
 
     /**
