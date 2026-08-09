@@ -141,6 +141,9 @@ extern "C" void board_charging_only_main(void)
 
     LatchPowerControlOn();
 
+    PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
+    backlight.SetBrightness(0);
+
     SpiLcdDisplay* display = baji_185_create_lcd_display(true);
     if (display == nullptr) {
         
@@ -148,8 +151,7 @@ extern "C" void board_charging_only_main(void)
     }
 
     display->ShowChargingFullscreen(true);
-
-    PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
+    vTaskDelay(pdMS_TO_TICKS(100));
     backlight.SetBrightness(POWER_CHARGING_FULLSCREEN_BACKLIGHT);
 
     InitV5mDetectPin();

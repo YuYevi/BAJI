@@ -380,6 +380,8 @@ void LvglDisplay::ShowChargingFullscreen(bool show) {
     }
     lv_obj_remove_flag(charging_fullscreen_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(charging_fullscreen_);
+    lv_obj_invalidate(charging_fullscreen_);
+    lv_refr_now(nullptr);
 }
 
 void LvglDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
