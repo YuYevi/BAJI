@@ -14,6 +14,12 @@
 
 #define TAG "CustomWakeWord"
 
+namespace {
+constexpr const char* kWakeWordSettingsNamespace = "wake_word";
+constexpr const char* kThresholdPercentKey = "threshold_pct";
+constexpr const char* kCommandsJsonKey = "commands_json";
+}  // namespace
+
 CustomWakeWord::CustomWakeWord()
     : wake_word_pcm_(), wake_word_opus_() {
 }
@@ -85,14 +91,14 @@ void CustomWakeWord::ParseWakenetModelConfig() {
 }
 
 void CustomWakeWord::LoadPersistedConfig() {
-    Settings settings("wake_word");
+    Settings settings(kWakeWordSettingsNamespace);
 
-    int threshold_percent = settings.GetInt("threshold_percent", -1);
+    int threshold_percent = settings.GetInt(kThresholdPercentKey, -1);
     if (threshold_percent >= 1 && threshold_percent <= 99) {
         threshold_ = static_cast<float>(threshold_percent) / 100.0f;
     }
 
-    std::string commands_json = settings.GetString("commands_json");
+    std::string commands_json = settings.GetString(kCommandsJsonKey);
     if (commands_json.empty()) {
         return;
     }
@@ -197,11 +203,11 @@ bool CustomWakeWord::PersistCurrentConfig() const {
         return false;
     }
 
-    Settings settings("wake_word", true);
+    Settings settings(kWakeWordSettingsNamespace, true);
     int threshold_percent = static_cast<int>(std::lround(threshold_ * 100.0f));
     threshold_percent = std::max(1, std::min(99, threshold_percent));
-    settings.SetInt("threshold_percent", threshold_percent);
-    settings.SetString("commands_json", commands_json);
+    settings.SetInt(kThresholdPercentKey, threshold_percent);
+    settings.SetString(kCommandsJsonKey, commands_json);
     return true;
 }
 
