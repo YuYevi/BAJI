@@ -15,6 +15,7 @@ static constexpr int MODEM_DETECT_MAX_RETRIES = 30;
 
 static constexpr int NETWORK_REG_MAX_RETRIES = 6;
 static constexpr int NETWORK_REG_WAIT_TIMEOUT_MS = 3000;
+static constexpr int NETWORK_RECOVERY_RETRY_DELAY_MS = 15000;
 static constexpr int MODEM_DETECT_BAUD_SWITCH_DELAY_MS = 250;
 static constexpr int MODEM_DETECT_RETRY_DELAY_MS = 1200;
 static constexpr int CSQ_CACHE_REFRESH_MS = 5000;
@@ -89,6 +90,7 @@ void Ml307Board::OnNetworkEvent(NetworkEvent event, const std::string& data) {
 }
 
 void Ml307Board::NetworkTask() {
+    while (!stop_requested_) {
     OnNetworkEvent(NetworkEvent::ModemDetecting);
 
     static const int detect_baud_rates[] = {921600, 115200};
@@ -127,7 +129,8 @@ void Ml307Board::NetworkTask() {
         }
         
         OnNetworkEvent(NetworkEvent::ModemErrorInitFailed);
-        return;
+        vTaskDelay(pdMS_TO_TICKS(NETWORK_RECOVERY_RETRY_DELAY_MS));
+        continue;
     }
 
     
@@ -193,8 +196,11 @@ void Ml307Board::NetworkTask() {
         if (stop_requested_) {
             return;
         }
-        
-        return;
+
+        OnNetworkEvent(NetworkEvent::Disconnected);
+        modem_.reset();
+        vTaskDelay(pdMS_TO_TICKS(NETWORK_RECOVERY_RETRY_DELAY_MS));
+        continue;
     }
 
     // Delay the first Connected event until WaitForNetworkReady() confirms the
@@ -214,6 +220,8 @@ void Ml307Board::NetworkTask() {
     
     
     
+    return;
+    }
 }
 
 void Ml307Board::StartNetwork() {
@@ -272,6 +280,20 @@ NetworkInterface* Ml307Board::GetNetwork() {
 
 const char* Ml307Board::GetNetworkStateIcon() {
     if (modem_ == nullptr || !modem_->network_ready()) {
+        return FONT_AWESOME_SIGNAL_OFF;
+    }
+
+    if (modem_->IsBusyForSignalQuery()) {
+        int csq = cached_csq_;
+        if (csq >= 20 && csq <= 31) {
+            return FONT_AWESOME_SIGNAL_STRONG;
+        } else if (csq >= 15 && csq <= 19) {
+            return FONT_AWESOME_SIGNAL_GOOD;
+        } else if (csq >= 10 && csq <= 14) {
+            return FONT_AWESOME_SIGNAL_FAIR;
+        } else if (csq >= 0 && csq <= 9) {
+            return FONT_AWESOME_SIGNAL_WEAK;
+        }
         return FONT_AWESOME_SIGNAL_OFF;
     }
 

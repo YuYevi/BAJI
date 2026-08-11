@@ -6,7 +6,10 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <esp_pthread.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include "application.h"
 #include "display.h"
@@ -204,13 +207,22 @@ void McpServer::AddUserOnlyTools() {
             auto url = properties["url"].value<std::string>();
             
             
-            auto& app = Application::GetInstance();
-            app.Schedule([url, &app]() {
-                bool success = app.UpgradeFirmware(url);
-                if (!success) {
-                    
-                }
-            });
+            auto* ctx = new (std::nothrow) std::string(url);
+            if (ctx == nullptr) {
+                return false;
+            }
+            BaseType_t ok = xTaskCreate(
+                [](void* arg) {
+                    std::unique_ptr<std::string> url(static_cast<std::string*>(arg));
+                    auto& app = Application::GetInstance();
+                    (void)app.UpgradeFirmware(*url);
+                    vTaskDelete(nullptr);
+                },
+                "mcp_ota", 8192, ctx, 3, nullptr);
+            if (ok != pdPASS) {
+                delete ctx;
+                return false;
+            }
             
             return true;
         });

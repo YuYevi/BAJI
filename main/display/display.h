@@ -70,16 +70,22 @@ protected:
 class DisplayLockGuard {
 public:
     DisplayLockGuard(Display *display) : display_(display) {
-        if (!display_->Lock(30000)) {
-            
+        if (display_ != nullptr) {
+            locked_ = display_->Lock(30000);
+            if (!locked_) {
+                ESP_LOGE("Display", "Timeout waiting for display lock");
+            }
         }
     }
     ~DisplayLockGuard() {
-        display_->Unlock();
+        if (display_ != nullptr && locked_) {
+            display_->Unlock();
+        }
     }
 
 private:
     Display *display_;
+    bool locked_ = false;
 };
 
 class NoDisplay : public Display {

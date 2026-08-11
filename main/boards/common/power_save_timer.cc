@@ -1,5 +1,6 @@
 #include "power_save_timer.h"
 #include "application.h"
+#include "board.h"
 #include "settings.h"
 
 #include <esp_log.h>
@@ -72,7 +73,11 @@ void PowerSaveTimer::PowerSaveCheck() {
             
             in_sleep_mode_ = true;
             if (on_enter_sleep_mode_) {
-                on_enter_sleep_mode_();
+                app.Schedule([this]() {
+                    if (in_sleep_mode_ && on_enter_sleep_mode_) {
+                        on_enter_sleep_mode_();
+                    }
+                });
             }
 
             if (cpu_max_freq_ != -1) {
@@ -126,7 +131,12 @@ void PowerSaveTimer::WakeUp() {
         }
 
         if (on_exit_sleep_mode_) {
-            on_exit_sleep_mode_();
+            auto& app = Application::GetInstance();
+            app.Schedule([this]() {
+                if (!in_sleep_mode_ && on_exit_sleep_mode_) {
+                    on_exit_sleep_mode_();
+                }
+            });
         }
     }
 }

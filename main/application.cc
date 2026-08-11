@@ -42,9 +42,11 @@
 #include <driver/gpio.h>
 #include <arpa/inet.h>
 #include <esp_app_desc.h>
+#include <esp_err.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <esp_system.h>
+#include <esp_task_wdt.h>
 #include <font_awesome.h>
 #include <vector>
 #include <string>
@@ -63,6 +65,7 @@ static constexpr uint32_t kRebootUiReactionMs = 700;
 static constexpr uint32_t kRebootFinalizeDelayMs = 550;
 static constexpr uint32_t kRebootNotificationMs = 1600;
 static constexpr uint32_t kRebootAudioShutdownDelayMs = 100;
+static constexpr int kAssetDownloadHttpTimeoutMs = 15000;
 static constexpr int kBleBindPollIntervalMs = 3000;
 static constexpr int kBleBindTimeoutNotifyAttempts = 600;
 static constexpr int kBleBindTimeoutNoticeMs = 5000;
@@ -707,6 +710,7 @@ static bool DownloadFileToPsram(const char* url, size_t max_size, uint8_t** out_
             vTaskDelay(pdMS_TO_TICKS(120));
             continue;
         }
+        http->SetTimeout(kAssetDownloadHttpTimeoutMs);
         if (!http->Open("GET", url)) {
             http->Close();
             vTaskDelay(pdMS_TO_TICKS(120));
@@ -1150,6 +1154,7 @@ void Application::Initialize() {
     });
 
     board.SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
+        Schedule([this, event, data]() {
         auto display = Board::GetInstance().GetDisplay();
 
         switch (event) {
@@ -1210,6 +1215,7 @@ void Application::Initialize() {
                 break;
         }
     });
+    });
 
     board.StartNetwork();
     display->UpdateStatusBar(true);
@@ -1227,6 +1233,13 @@ void Application::Initialize() {
  */
 void Application::Run() {
     vTaskPrioritySet(nullptr, 10);
+#if CONFIG_ESP_TASK_WDT_EN
+    esp_err_t wdt_err = esp_task_wdt_add(nullptr);
+    if (wdt_err != ESP_OK && wdt_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "Failed to add application task to watchdog: %s",
+                 esp_err_to_name(wdt_err));
+    }
+#endif
 
     const EventBits_t ALL_EVENTS = MAIN_EVENT_SCHEDULE | MAIN_EVENT_SEND_AUDIO |
                                    MAIN_EVENT_WAKE_WORD_DETECTED | MAIN_EVENT_VAD_CHANGE |
@@ -1239,6 +1252,9 @@ void Application::Run() {
     while (true) {
         // 等待事件组中的位，直到有事件发生
         auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE, portMAX_DELAY);
+#if CONFIG_ESP_TASK_WDT_EN
+        esp_task_wdt_reset();
+#endif
 
         if (bits & MAIN_EVENT_ERROR) {
             // 处理错误事件

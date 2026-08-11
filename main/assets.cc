@@ -26,6 +26,8 @@
 #include <esp_heap_caps.h>
 #include <cbin_font.h>
 
+static constexpr int kAssetHttpTimeoutMs = 15000;
+
 #define TAG                 "Assets"          // 日志标签
 #define PARTITION_LABEL     "assets"          // 资源分区标签名
 
@@ -682,6 +684,7 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
         ESP_LOGE(TAG, "Failed to create asset download HTTP client");
         return false;
     }
+    http->SetTimeout(kAssetHttpTimeoutMs);
     
     // 打开 HTTP 连接
     if (!http->Open("GET", url)) {
