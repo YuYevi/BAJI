@@ -68,12 +68,13 @@ private:
         uint8_t level;
     };
 
+    // Measured BAJI pack range: full is about 4.10V, while hardware cut-off is about 3.00V. Keep reserve at the bottom so the UI reaches 0% before shutoff.
     inline static constexpr std::array<BatteryPoint, 21> kBatteryCurve = {{
-        {4177, 100}, {4129, 95}, {4086, 90}, {4045, 85}, {4008, 80},
-        {3975, 75},  {3945, 70}, {3918, 65}, {3884, 60}, {3841, 55},
-        {3821, 50},  {3806, 45}, {3793, 40}, {3784, 35}, {3775, 30},
-        {3762, 25},  {3741, 20}, {3710, 15}, {3687, 10}, {3675, 5},
-        {3306, 0},
+        {4100, 100}, {4065, 95}, {4025, 90}, {3985, 85}, {3945, 80},
+        {3905, 75},  {3865, 70}, {3825, 65}, {3790, 60}, {3755, 55},
+        {3720, 50},  {3685, 45}, {3650, 40}, {3615, 35}, {3580, 30},
+        {3540, 25},  {3500, 20}, {3420, 15}, {3340, 10}, {3240, 5},
+        {3150, 0},
     }};
 
     static constexpr int kBatteryAdcInterval = 1;
@@ -89,7 +90,8 @@ private:
     static constexpr int kChargeStateDebounceTime = 2;
     static constexpr int kChargingLevelStepInterval = 12;
     static constexpr int kDischargingLevelStepInterval = 20;
-    static constexpr int kNearFullBatteryMv = 4130;
+    // Require a little headroom before declaring "full" on charge.
+    static constexpr int kNearFullBatteryMv = 4050;
     static constexpr int kNearFullChargeTime = 180;
     static constexpr int kNearFullLevel = 95;
 
