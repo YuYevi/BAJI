@@ -164,11 +164,40 @@ private:
         power_key_force_reset_handled_ = true;
         shutdown_requested_ = true;
 
-        ESP_LOGW("PowerManager", "Power key force reset");
+        AbnormalReporter::MarkExpectedReset("poweroff_force_reset");
+        ESP_LOGW("PowerManager", "Power key hard power off");
+
+        if (timer_handle_) {
+            esp_timer_stop(timer_handle_);
+        }
+        if (power_timer_handle_) {
+            esp_timer_stop(power_timer_handle_);
+        }
+
         gpio_set_level(DISPLAY_BACKLIGHT_PIN, 0);
+
+        gpio_config_t wake_in = {};
+        wake_in.intr_type = GPIO_INTR_DISABLE;
+        wake_in.mode = GPIO_MODE_INPUT;
+        wake_in.pin_bit_mask = (1ULL << Power_Dec);
+        wake_in.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        wake_in.pull_up_en = GPIO_PULLUP_ENABLE;
+        gpio_config(&wake_in);
+
+        esp_err_t err = esp_sleep_enable_ext1_wakeup((1ULL << Power_Dec), ESP_EXT1_WAKEUP_ANY_LOW);
+        if (err != ESP_OK) {
+            esp_sleep_enable_ext0_wakeup(Power_Dec, 0);
+        }
+
         gpio_set_level(Power_Control, 0);
         vTaskDelay(pdMS_TO_TICKS(200));
-        esp_restart();
+
+        while (POWER_KEY_PRESSED()) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+
+        esp_deep_sleep_start();
     }
 
     void OnPowerKeyStablePress() {
@@ -226,6 +255,8 @@ private:
             }
             if (!power_key_force_reset_handled_ &&
                 power_key_force_press_ticks_ >= kPowerKeyForceResetHoldTicks) {
+                power_key_long_press_handled_ = true;
+                ResetPowerKeyClickState();
                 TriggerForceResetFromPowerKey();
                 return;
             }
@@ -697,7 +728,6 @@ private:
     }
 
     void RunShutdownSequence() {
-        
         if (on_power_ui_) {
             on_power_ui_(PowerUiHint::ShuttingDown);
         }
@@ -744,7 +774,6 @@ private:
 
         vTaskDelay(pdMS_TO_TICKS(200));
 
-        
         while (POWER_KEY_PRESSED()) {
             vTaskDelay(pdMS_TO_TICKS(50));
         }
@@ -773,7 +802,6 @@ public:
         power_key_stable_pressed_ = power_key_raw_pressed_;
         power_key_ignore_release_ = power_key_stable_pressed_;
 
-        
         gpio_config_t io_conf = {};
         io_conf.intr_type = GPIO_INTR_DISABLE;
         io_conf.mode = GPIO_MODE_INPUT;
