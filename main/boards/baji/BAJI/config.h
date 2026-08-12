@@ -4,6 +4,8 @@
 #include <driver/gpio.h>
 #include <driver/spi_master.h>
 
+#define POWER_KEY_FORCE_RESET_HOLD_MS           5000
+
 /*
  * 音频配置
  */
