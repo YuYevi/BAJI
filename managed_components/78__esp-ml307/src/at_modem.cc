@@ -9,31 +9,48 @@
 
 static const char* TAG = "AtModem";
 
+namespace {
+
+std::string QueryModuleRevision(const std::shared_ptr<AtUart>& uart) {
+    const char* revision_commands[] = {"AT+CGMR", "ATI"};
+    for (const char* command : revision_commands) {
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            if (uart->SendCommand(command, 3000)) {
+                std::string response = uart->GetResponse();
+                if (!response.empty()) {
+                    return response;
+                }
+            }
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+    }
+    return {};
+}
+
+}  // namespace
+
 std::unique_ptr<AtModem> AtModem::Detect(gpio_num_t tx_pin, gpio_num_t rx_pin, gpio_num_t dtr_pin, int baud_rate, int timeout_ms) {
-    // 调用带 RI pin 的版本，RI pin 默认为 GPIO_NUM_NC
+    // 调用�?RI pin 的版本，RI pin 默认�?GPIO_NUM_NC
     return Detect(tx_pin, rx_pin, dtr_pin, GPIO_NUM_NC, baud_rate, timeout_ms);
 }
 
 std::unique_ptr<AtModem> AtModem::Detect(gpio_num_t tx_pin, gpio_num_t rx_pin, gpio_num_t dtr_pin, gpio_num_t ri_pin, int baud_rate, int timeout_ms) {
-    // 创建AtUart进行检测
+    // 创建AtUart进行检�?
     auto uart = std::make_shared<AtUart>(tx_pin, rx_pin, dtr_pin, ri_pin);
     uart->Initialize();
     
-    // 设置波特率
+    // 设置波特�?
     if (!uart->SetBaudRate(baud_rate, timeout_ms)) {
         return nullptr;
     }
-    
-    // 发送AT+CGMR（或ATI）命令获取模组型号
-    if (!uart->SendCommand("AT+CGMR", 3000)) {
-        ESP_LOGE(TAG, "Failed to send AT+CGMR command");
-        return nullptr;
+    std::string response = QueryModuleRevision(uart);
+    if (response.empty()) {
+        ESP_LOGW(TAG, "Failed to query modem revision, defaulting to ML307");
+        return std::make_unique<Ml307AtModem>(uart);
     }
-    
-    std::string response = uart->GetResponse();
     ESP_LOGI(TAG, "Detected modem: %s", response.c_str());
     
-    // 检查响应中的模组型号
+    // 检查响应中的模组型�?
     if (response.find("EC801E") == 0) {
         return std::make_unique<Ec801EAtModem>(uart);
     } else if (response.find("NT26K") == 0) {
@@ -115,7 +132,7 @@ NetworkStatus AtModem::WaitForNetworkReady(int timeout_ms) {
         return ms > 0 ? ms : 1;
     };
     
-    // 检查 SIM 卡是否准备好
+    // 检�?SIM 卡是否准备好
     for (int i = 0; !has_timeout || i < 10; i++) {
         if (at_uart_->SendCommand("AT+CPIN?")) {
             pin_ready_ = true;
@@ -136,7 +153,7 @@ NetworkStatus AtModem::WaitForNetworkReady(int timeout_ms) {
         vTaskDelay(wait_ticks);
     }
 
-    // 检查网络注册状态
+    // 检查网络注册状�?
     int command_timeout_ms = remaining_timeout_ms();
     if (command_timeout_ms == 0) {
         return NetworkStatus::ErrorTimeout;
@@ -195,10 +212,10 @@ std::string AtModem::GetModuleRevision() {
     if (!module_revision_.empty()) {
         return module_revision_;
     }
-    if (at_uart_->SendCommand("AT+CGMR")) {
-        module_revision_ = at_uart_->GetResponse();
-    } else {
-        ESP_LOGE(TAG, "Failed to send AT+CGMR command");
+    module_revision_ = QueryModuleRevision(at_uart_);
+    if (module_revision_.empty()) {
+        module_revision_ = "ML307";
+        ESP_LOGW(TAG, "Failed to query modem revision, defaulting to ML307");
     }
     return module_revision_;
 }

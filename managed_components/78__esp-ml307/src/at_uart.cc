@@ -461,6 +461,7 @@ bool AtUart::SetBaudRate(int new_baud_rate, int timeout_ms) {
     }
     uart_set_baudrate(uart_num_, new_baud_rate);
     baud_rate_ = new_baud_rate;
+    vTaskDelay(pdMS_TO_TICKS(120));
     ESP_LOGI(TAG, "Set baud rate to %d", new_baud_rate);
     return true;
 }

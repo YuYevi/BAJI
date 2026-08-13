@@ -1185,7 +1185,7 @@ private:
      * 
      * @param for_dialog_wake 是否为对话唤醒启动
      */
-    bool Start4gAsync(bool for_dialog_wake) {
+    bool Start4gAsync(bool for_dialog_wake, bool cold_boot_start = false) {
         if (fourg_boot_task_ != nullptr) {
             return true;
         }
@@ -1193,9 +1193,10 @@ private:
         struct Start4gCtx {
             CustomBoard* self;
             bool for_dialog_wake;
+            bool cold_boot_start;
         };
 
-        auto* ctx = new (std::nothrow) Start4gCtx{this, for_dialog_wake};
+        auto* ctx = new (std::nothrow) Start4gCtx{this, for_dialog_wake, cold_boot_start};
         if (ctx == nullptr) {
             SetNetFlowState(NetFlowState::Idle);
             ESP_LOGE(TAG, "Failed to allocate 4G start context");
@@ -1206,13 +1207,16 @@ private:
             auto* ctx = static_cast<Start4gCtx*>(arg);
             auto self = ctx->self;
             const bool for_dialog_wake = ctx->for_dialog_wake;
+            const bool cold_boot_start = ctx->cold_boot_start;
             delete ctx;
 
             self->TurnOn4GModule();
 
             if (self->fourg_power_on_) {
-                // Wait for the modem UART to become stable before the first AT probe.
-                vTaskDelay(pdMS_TO_TICKS(for_dialog_wake ? 2200 : 2600));
+                // Give the initial boot a longer UART stabilization window; warm reboots stay faster.
+                const int base_delay_ms = for_dialog_wake ? 2200 : 2600;
+                const int extra_delay_ms = cold_boot_start ? 2500 : 0;
+                vTaskDelay(pdMS_TO_TICKS(base_delay_ms + extra_delay_ms));
             }
 
             if (!self->ml307_board_) {
@@ -1299,7 +1303,7 @@ private:
                 self->SetWifiAutoReconnectEnabled(false);
                 self->StopWifiNow();
                 self->net_mode_ = NetMode::ML307;
-                if (!self->Start4gAsync(for_dialog_wake)) {
+                if (!self->Start4gAsync(for_dialog_wake, false)) {
                     self->FallbackToWifiAfter4gStartFailure();
                 }
             } else {
@@ -1815,7 +1819,7 @@ public:
         net_mode_ = NetMode::ML307;
         SetNetFlowState(NetFlowState::Connecting4G);
         GetDisplay()->SetStatus("连接4G");
-        if (!Start4gAsync(false)) {
+        if (!Start4gAsync(false, true)) {
             FallbackToWifiAfter4gStartFailure();
         }
     }
