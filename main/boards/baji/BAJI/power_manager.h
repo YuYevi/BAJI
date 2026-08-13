@@ -22,7 +22,6 @@
 #include <esp_log.h>
 #include <esp_sleep.h>
 #include <esp_system.h>
-#include <esp_task_wdt.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -35,7 +34,6 @@ class PowerManager {
 private:
     esp_timer_handle_t timer_handle_ = nullptr;
     esp_timer_handle_t power_timer_handle_ = nullptr;
-    TaskHandle_t power_key_task_handle_ = nullptr;
     std::function<void(bool)> on_charging_status_changed_;
     std::function<void(bool)> on_low_battery_status_changed_;
 
@@ -107,18 +105,14 @@ private:
     bool power_key_ignore_release_ = false;
     uint16_t power_key_debounce_ticks_ = 0;
     uint16_t power_key_press_ticks_ = 0;
-    uint16_t power_key_force_press_ticks_ = 0;
     uint16_t power_key_click_window_ticks_ = 0;
     uint16_t power_key_click_guard_ticks_ = 0;
     uint8_t power_key_click_count_ = 0;
-    bool power_key_force_reset_handled_ = false;
 
     static constexpr uint16_t kPowerKeyDebounceTicks =
         (POWER_KEY_DEBOUNCE_MS + POWER_KEY_SCAN_INTERVAL_MS - 1) / POWER_KEY_SCAN_INTERVAL_MS;
     static constexpr uint16_t kPowerKeyShutdownHoldTicks =
         (POWER_KEY_SHUTDOWN_HOLD_MS + POWER_KEY_SCAN_INTERVAL_MS - 1) / POWER_KEY_SCAN_INTERVAL_MS;
-    static constexpr uint16_t kPowerKeyForceResetHoldTicks =
-        (POWER_KEY_FORCE_RESET_HOLD_MS + POWER_KEY_SCAN_INTERVAL_MS - 1) / POWER_KEY_SCAN_INTERVAL_MS;
     static constexpr uint16_t kPowerKeyDoubleClickWindowTicks =
         (POWER_KEY_DOUBLE_CLICK_WINDOW_MS + POWER_KEY_SCAN_INTERVAL_MS - 1) / POWER_KEY_SCAN_INTERVAL_MS;
     static constexpr uint16_t kPowerKeyMultiClickGuardTicks =
@@ -151,24 +145,13 @@ private:
     }
 
     void TriggerShutdownFromPowerKey() {
+        if (timer_handle_) {
+            esp_timer_stop(timer_handle_);
+            esp_timer_delete(timer_handle_);
+            timer_handle_ = nullptr;
+        }
         shutdown_requested_ = true;
         shutdown();
-    }
-
-    void TriggerForceResetFromPowerKey() {
-        if (power_key_force_press_ticks_ == 0) {
-            return;
-        }
-
-        power_key_force_press_ticks_ = 0;
-        power_key_force_reset_handled_ = true;
-        shutdown_requested_ = true;
-
-        ESP_LOGW("PowerManager", "Power key force reset");
-        gpio_set_level(DISPLAY_BACKLIGHT_PIN, 0);
-        gpio_set_level(Power_Control, 0);
-        vTaskDelay(pdMS_TO_TICKS(200));
-        esp_restart();
     }
 
     void OnPowerKeyStablePress() {
@@ -218,25 +201,11 @@ private:
     }
 
     void HandlePowerKey() {
-        const bool raw_pressed = POWER_KEY_PRESSED();
-
-        if (raw_pressed) {
-            if (power_key_force_press_ticks_ < kPowerKeyForceResetHoldTicks) {
-                power_key_force_press_ticks_++;
-            }
-            if (!power_key_force_reset_handled_ &&
-                power_key_force_press_ticks_ >= kPowerKeyForceResetHoldTicks) {
-                TriggerForceResetFromPowerKey();
-                return;
-            }
-        } else {
-            power_key_force_press_ticks_ = 0;
-            power_key_force_reset_handled_ = false;
-        }
-
         if (shutdown_requested_) {
             return;
         }
+
+        const bool raw_pressed = POWER_KEY_PRESSED();
 
         if (raw_pressed != power_key_raw_pressed_) {
             power_key_raw_pressed_ = raw_pressed;
@@ -293,26 +262,6 @@ private:
             if (power_key_click_window_ticks_ >= kPowerKeyDoubleClickWindowTicks) {
                 FinalizePowerKeyClicks();
             }
-        }
-    }
-
-    static void PowerKeyTask(void* arg) {
-        auto* self = static_cast<PowerManager*>(arg);
-
-#if CONFIG_ESP_TASK_WDT_EN
-        esp_err_t wdt_err = esp_task_wdt_add(nullptr);
-        if (wdt_err != ESP_OK && wdt_err != ESP_ERR_INVALID_STATE) {
-            ESP_LOGW("PowerManager", "Failed to add power key task to watchdog: %s",
-                     esp_err_to_name(wdt_err));
-        }
-#endif
-
-        while (true) {
-            self->HandlePowerKey();
-#if CONFIG_ESP_TASK_WDT_EN
-            esp_task_wdt_reset();
-#endif
-            vTaskDelay(pdMS_TO_TICKS(POWER_KEY_SCAN_INTERVAL_MS));
         }
     }
 
@@ -703,6 +652,9 @@ private:
         }
         vTaskDelay(pdMS_TO_TICKS(500));
 
+        if (power_timer_handle_) {
+            esp_timer_stop(power_timer_handle_);
+        }
         if (timer_handle_) {
             esp_timer_stop(timer_handle_);
         }
@@ -822,23 +774,18 @@ public:
         }
         
         
-        BaseType_t power_key_task_ok = xTaskCreate(PowerKeyTask, "power_key_scan", 3072, this,
-                                                   tskIDLE_PRIORITY + 11, &power_key_task_handle_);
-        if (power_key_task_ok != pdPASS) {
-            ESP_LOGW("PowerManager", "Failed to create power key task, falling back to esp_timer");
-            esp_timer_create_args_t power_timer_args = {
-                .callback = [](void* arg) {
-                    PowerManager* self = static_cast<PowerManager*>(arg);
-                    self->HandlePowerKey();
-                },
-                .arg = this,
-                .dispatch_method = ESP_TIMER_TASK,
-                .name = "power_cotrol_timer",
-                .skip_unhandled_events = true,
-            };
-            ESP_ERROR_CHECK(esp_timer_create(&power_timer_args, &power_timer_handle_));
-            ESP_ERROR_CHECK(esp_timer_start_periodic(power_timer_handle_, POWER_KEY_SCAN_INTERVAL_MS * 1000));
-        }
+        esp_timer_create_args_t power_timer_args = {
+            .callback = [](void* arg) {
+                PowerManager* self = static_cast<PowerManager*>(arg);
+                self->HandlePowerKey();
+            },
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "power_cotrol_timer",
+            .skip_unhandled_events = true,
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&power_timer_args, &power_timer_handle_));
+        ESP_ERROR_CHECK(esp_timer_start_periodic(power_timer_handle_, POWER_KEY_SCAN_INTERVAL_MS * 1000));
 
         adc_oneshot_unit_init_cfg_t init_config = {
             .unit_id = POWER_CBS_ADC_UNIT,
@@ -890,10 +837,6 @@ public:
         if (power_timer_handle_) {
             esp_timer_stop(power_timer_handle_);
             esp_timer_delete(power_timer_handle_);
-        }
-        if (power_key_task_handle_ != nullptr) {
-            vTaskDelete(power_key_task_handle_);
-            power_key_task_handle_ = nullptr;
         }
         if (adc_handle_ != nullptr) {
             adc_oneshot_del_unit(adc_handle_);
