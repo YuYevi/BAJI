@@ -2489,13 +2489,13 @@ void Application::HandleMqttCommand(const char* json, int len) {
         ClearCloudBindingSettings();
         success = true;
         Schedule([this]() {
+            ExitAiChatToStandby();
             if (protocol_ && protocol_->IsAudioChannelOpened()) {
                 protocol_->CloseAudioChannel(false);
             }
             protocol_generation_.fetch_add(1);
             protocol_.reset();
             MqttControl::GetInstance().StopForNetworkSwitch();
-            SetDeviceState(kDeviceStateActivating);
 
             auto& board = Board::GetInstance();
             bool expected = false;
@@ -2503,12 +2503,29 @@ void Application::HandleMqttCommand(const char* json, int len) {
                 return;
             }
 
-            if (!board.EnterBleBindMode()) {
+            SetDeviceState(kDeviceStateActivating);
+            PlaySound(Lang::Sounds::OGG_ACTIVATION);
+            if (!audio_service_.WaitForPlaybackQueueEmpty(5000)) {
+                ESP_LOGW(TAG, "Timed out waiting for activation sound playback");
+            }
+            audio_service_.Stop();
+            if (!audio_service_.WaitForStopped(5000)) {
+                g_ble_bind_wait_in_progress = false;
+                SetDeviceState(kDeviceStateIdle);
                 Alert(Lang::Strings::ERROR, Lang::Strings::BLUFI_INIT_FAILED,
                       "triangle_exclamation", Lang::Sounds::OGG_EXCLAMATION);
+                return;
             }
 
-            PlaySound(Lang::Sounds::OGG_ACTIVATION);
+            if (!board.EnterBleBindMode()) {
+                g_ble_bind_wait_in_progress = false;
+                board.ExitBleBindMode();
+                audio_service_.Start();
+                SetDeviceState(kDeviceStateIdle);
+                Alert(Lang::Strings::ERROR, Lang::Strings::BLUFI_INIT_FAILED,
+                      "triangle_exclamation", Lang::Sounds::OGG_EXCLAMATION);
+                return;
+            }
 
             struct BleBindWaitTaskCtx {
                 Application* app;
@@ -2525,16 +2542,15 @@ void Application::HandleMqttCommand(const char* json, int len) {
                         while (app->GetDeviceState() == kDeviceStateActivating) {
                             auto& board = Board::GetInstance();
                             if (!board.IsBleBindModeActive()) {
-                                if (!board.EnterBleBindMode()) {
-                                    app->Schedule([app]() {
-                                        app->Alert(Lang::Strings::ERROR,
-                                                   Lang::Strings::BLUFI_INIT_FAILED,
-                                                   "triangle_exclamation",
-                                                   Lang::Sounds::OGG_EXCLAMATION);
-                                    });
-                                    vTaskDelay(pdMS_TO_TICKS(10000));
-                                    continue;
-                                }
+                                app->Schedule([app]() {
+                                    app->GetAudioService().Start();
+                                    app->SetDeviceState(kDeviceStateIdle);
+                                    app->Alert(Lang::Strings::ERROR,
+                                               Lang::Strings::BLUFI_INIT_FAILED,
+                                               "triangle_exclamation",
+                                               Lang::Sounds::OGG_EXCLAMATION);
+                                });
+                                break;
                             }
 
                             Ota ota;
@@ -2568,6 +2584,8 @@ void Application::HandleMqttCommand(const char* json, int len) {
                 delete ctx;
                 g_ble_bind_wait_in_progress = false;
                 board.ExitBleBindMode();
+                audio_service_.Start();
+                SetDeviceState(kDeviceStateIdle);
                 Alert(Lang::Strings::ERROR, Lang::Strings::BLUFI_INIT_FAILED,
                       "triangle_exclamation", Lang::Sounds::OGG_EXCLAMATION);
             }
@@ -3109,6 +3127,7 @@ void Application::HandleRebindSuccess() {
         SetDeviceState(kDeviceStateIdle);
         auto display = board.GetDisplay();
         display->HideActivationQrCode();
+        audio_service_.Start();
         audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
 
         Settings mqtt_ctrl_settings("mqtt_ctrl", false);
