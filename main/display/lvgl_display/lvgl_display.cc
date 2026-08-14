@@ -490,6 +490,9 @@ void LvglDisplay::ShowActivationPrompt(const char* message) {
                                      display->activation_prompt_wait_dot_count_);
         },
         kActivationPromptWaitIntervalMs, this);
+
+    lv_obj_invalidate(activation_qr_overlay_);
+    lv_refr_now(nullptr);
 }
 
 void LvglDisplay::ShowActivationQrCode(const char* code) {

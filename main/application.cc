@@ -162,6 +162,14 @@ static bool IsBleBindClientConnected() {
 #endif
 }
 
+static uint32_t GetBleBindClientDisconnectGeneration() {
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    return Blufi::GetInstance().GetBleClientDisconnectGeneration();
+#else
+    return 0;
+#endif
+}
+
 static bool PauseBleBindModeBeforeCloudCheck(Board& board) {
     if (!board.IsBleBindModeActive()) {
         return false;
@@ -1793,6 +1801,8 @@ void Application::CheckNewVersion() {
     int activation_sound_play_count = 0;
     TickType_t last_activation_sound_finished_tick = 0;
     TickType_t last_activation_cloud_check_tick = 0;
+    uint32_t handled_ble_disconnect_generation =
+        GetBleBindClientDisconnectGeneration();
     bool waiting_for_activation = false;
     bool activation_bind_ui_shown = false;
     bool activation_status_ui_shown = false;
@@ -1807,13 +1817,15 @@ void Application::CheckNewVersion() {
             display->SetStatus(Lang::Strings::CHECKING_NEW_VERSION);
         } else {
             const TickType_t now = xTaskGetTickCount();
-            if (last_activation_cloud_check_tick != 0 &&
-                now - last_activation_cloud_check_tick <
-                    pdMS_TO_TICKS(kBleBindCloudPollIntervalMs)) {
+            const bool fast_activation_check_pending =
+                GetBleBindClientDisconnectGeneration() != handled_ble_disconnect_generation;
+            if (board.IsBleBindModeActive() && IsBleBindClientConnected()) {
                 vTaskDelay(pdMS_TO_TICKS(kBleBindPollIntervalMs));
                 continue;
             }
-            if (board.IsBleBindModeActive() && IsBleBindClientConnected()) {
+            if (!fast_activation_check_pending && last_activation_cloud_check_tick != 0 &&
+                now - last_activation_cloud_check_tick <
+                    pdMS_TO_TICKS(kBleBindCloudPollIntervalMs)) {
                 vTaskDelay(pdMS_TO_TICKS(kBleBindPollIntervalMs));
                 continue;
             }
@@ -1822,6 +1834,14 @@ void Application::CheckNewVersion() {
         // 检查服务器是否有新版本
         const bool paused_ble_for_check =
             waiting_for_activation && PauseBleBindModeBeforeCloudCheck(board);
+        if (waiting_for_activation && !paused_ble_for_check &&
+            board.IsBleBindModeActive()) {
+            vTaskDelay(pdMS_TO_TICKS(kBleBindPollIntervalMs));
+            continue;
+        }
+        if (waiting_for_activation) {
+            handled_ble_disconnect_generation = GetBleBindClientDisconnectGeneration();
+        }
         esp_err_t err = ota_->CheckVersion();
         if (waiting_for_activation) {
             last_activation_cloud_check_tick = xTaskGetTickCount();
@@ -1903,6 +1923,9 @@ void Application::CheckNewVersion() {
             break;
         }
 
+        if (!waiting_for_activation && ota_->HasActivationCode()) {
+            last_activation_cloud_check_tick = xTaskGetTickCount();
+        }
         waiting_for_activation = true;
         display->SetStatus(Lang::Strings::ACTIVATION);
 
@@ -2558,6 +2581,7 @@ void Application::HandleMqttCommand(const char* json, int len) {
             }
 
             SetDeviceState(kDeviceStateActivating);
+            ShowActivationStatus(Lang::Strings::PLEASE_WAIT, "bluetooth");
             PlaySound(Lang::Sounds::OGG_ACTIVATION);
             if (!audio_service_.WaitForPlaybackQueueEmpty(5000)) {
                 ESP_LOGW(TAG, "Timed out waiting for activation sound playback");
@@ -2571,6 +2595,8 @@ void Application::HandleMqttCommand(const char* json, int len) {
                 return;
             }
 
+            const uint32_t initial_ble_disconnect_generation =
+                GetBleBindClientDisconnectGeneration();
             if (!board.EnterBleBindMode()) {
                 g_ble_bind_wait_in_progress = false;
                 board.ExitBleBindMode();
@@ -2583,17 +2609,21 @@ void Application::HandleMqttCommand(const char* json, int len) {
 
             struct BleBindWaitTaskCtx {
                 Application* app;
+                uint32_t initial_ble_disconnect_generation;
             };
-            auto* ctx = new (std::nothrow) BleBindWaitTaskCtx{this};
+            auto* ctx = new (std::nothrow)
+                BleBindWaitTaskCtx{this, initial_ble_disconnect_generation};
             if (ctx == nullptr ||
                 xTaskCreate(
                     [](void* arg) {
                         auto* ctx = static_cast<BleBindWaitTaskCtx*>(arg);
                         auto* app = ctx->app;
+                        uint32_t handled_ble_disconnect_generation =
+                            ctx->initial_ble_disconnect_generation;
                         delete ctx;
 
                         int attempt = 0;
-                        TickType_t last_cloud_check_tick = 0;
+                        TickType_t last_cloud_check_tick = xTaskGetTickCount();
                         while (app->GetDeviceState() == kDeviceStateActivating) {
                             auto& board = Board::GetInstance();
                             if (!board.IsBleBindModeActive()) {
@@ -2609,14 +2639,24 @@ void Application::HandleMqttCommand(const char* json, int len) {
                             }
 
                             const TickType_t now = xTaskGetTickCount();
+                            const bool fast_activation_check_pending =
+                                GetBleBindClientDisconnectGeneration() !=
+                                handled_ble_disconnect_generation;
+                            const bool ble_client_connected = IsBleBindClientConnected();
                             const bool should_check_cloud =
-                                !IsBleBindClientConnected() &&
-                                (last_cloud_check_tick == 0 ||
+                                !ble_client_connected &&
+                                (fast_activation_check_pending ||
                                  now - last_cloud_check_tick >=
                                      pdMS_TO_TICKS(kBleBindCloudPollIntervalMs));
                             if (should_check_cloud) {
                                 const bool paused_ble_for_check =
                                     PauseBleBindModeBeforeCloudCheck(board);
+                                if (!paused_ble_for_check && board.IsBleBindModeActive()) {
+                                    vTaskDelay(pdMS_TO_TICKS(kBleBindPollIntervalMs));
+                                    continue;
+                                }
+                                handled_ble_disconnect_generation =
+                                    GetBleBindClientDisconnectGeneration();
                                 Ota ota;
                                 const bool rebind_done =
                                     ota.CheckVersion() == ESP_OK && !ota.HasActivationCode() &&

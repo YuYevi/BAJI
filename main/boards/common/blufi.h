@@ -47,6 +47,8 @@ public:
 
     bool IsBleConnected() const;
 
+    uint32_t GetBleClientDisconnectGeneration() const;
+
     void SetProvisioningDoneCallback(std::function<void()> callback);
 
     const char *GetDeviceName() const;
@@ -229,6 +231,7 @@ private:
     std::atomic<uint32_t> m_session_generation{0};
     std::atomic<uint32_t> m_connect_attempt_generation{0};
     std::atomic<uint32_t> m_ble_connection_generation{0};
+    std::atomic<uint32_t> m_ble_client_disconnect_generation{0};
     std::atomic<uint32_t> m_scan_ble_generation{0};
     std::atomic<uint32_t> m_wifi_scan_done_generation{0};
     std::atomic<uint32_t> m_wifi_disconnect_generation{0};

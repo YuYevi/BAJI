@@ -157,6 +157,10 @@ bool Blufi::IsBleConnected() const {
     return m_ble_is_connected.load();
 }
 
+uint32_t Blufi::GetBleClientDisconnectGeneration() const {
+    return m_ble_client_disconnect_generation.load();
+}
+
 void Blufi::SetProvisioningDoneCallback(std::function<void()> callback) {
     std::lock_guard<std::mutex> lock(m_callback_mutex);
     m_provisioning_done_callback = std::move(callback);
@@ -1590,7 +1594,9 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             _security_init();
             break;
         case ESP_BLUFI_EVENT_BLE_DISCONNECT:
-            m_ble_is_connected.store(false);
+            if (m_ble_is_connected.exchange(false) && IsActive()) {
+                m_ble_client_disconnect_generation.fetch_add(1);
+            }
             m_ble_connection_generation.fetch_add(1);
             if (IsActive()) {
                 _cancel_wifi_attempt(m_wifi_started);
