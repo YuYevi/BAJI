@@ -67,6 +67,8 @@ static constexpr uint32_t kRebootNotificationMs = 1600;
 static constexpr uint32_t kRebootAudioShutdownDelayMs = 100;
 static constexpr int kAssetDownloadHttpTimeoutMs = 15000;
 static constexpr int kBleBindPollIntervalMs = 3000;
+static constexpr int kBleBindCloudPollIntervalMs = 10000;
+static constexpr int kBleBindReleaseBeforeCloudCheckMs = 500;
 static constexpr int kBleBindTimeoutNotifyAttempts = 600;
 static constexpr int kBleBindTimeoutNoticeMs = 5000;
 static constexpr int kActivationRetryDelayMaxSec = 60;
@@ -150,6 +152,27 @@ static std::string BuildBleBindTimeoutNotice() {
     }
 #endif
     return notice;
+}
+
+static bool IsBleBindClientConnected() {
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    return Blufi::GetInstance().IsBleConnected();
+#else
+    return false;
+#endif
+}
+
+static bool PauseBleBindModeBeforeCloudCheck(Board& board) {
+    if (!board.IsBleBindModeActive()) {
+        return false;
+    }
+    if (IsBleBindClientConnected()) {
+        return false;
+    }
+
+    board.ExitBleBindMode();
+    vTaskDelay(pdMS_TO_TICKS(kBleBindReleaseBeforeCloudCheckMs));
+    return true;
 }
 
 static const char* BatteryStateToMqttString(bool charging, bool discharging) {
@@ -1769,6 +1792,7 @@ void Application::CheckNewVersion() {
     int retry_delay = 10;
     int activation_sound_play_count = 0;
     TickType_t last_activation_sound_finished_tick = 0;
+    TickType_t last_activation_cloud_check_tick = 0;
     bool waiting_for_activation = false;
     bool activation_bind_ui_shown = false;
     bool activation_status_ui_shown = false;
@@ -1781,11 +1805,33 @@ void Application::CheckNewVersion() {
         auto display = board.GetDisplay();
         if (!waiting_for_activation) {
             display->SetStatus(Lang::Strings::CHECKING_NEW_VERSION);
+        } else {
+            const TickType_t now = xTaskGetTickCount();
+            if (last_activation_cloud_check_tick != 0 &&
+                now - last_activation_cloud_check_tick <
+                    pdMS_TO_TICKS(kBleBindCloudPollIntervalMs)) {
+                vTaskDelay(pdMS_TO_TICKS(kBleBindPollIntervalMs));
+                continue;
+            }
+            if (board.IsBleBindModeActive() && IsBleBindClientConnected()) {
+                vTaskDelay(pdMS_TO_TICKS(kBleBindPollIntervalMs));
+                continue;
+            }
         }
 
         // 检查服务器是否有新版本
+        const bool paused_ble_for_check =
+            waiting_for_activation && PauseBleBindModeBeforeCloudCheck(board);
         esp_err_t err = ota_->CheckVersion();
+        if (waiting_for_activation) {
+            last_activation_cloud_check_tick = xTaskGetTickCount();
+        }
         if (err != ESP_OK) {
+            if (paused_ble_for_check && GetDeviceState() == kDeviceStateActivating &&
+                !board.EnterBleBindMode()) {
+                Alert(Lang::Strings::ERROR, Lang::Strings::BLUFI_INIT_FAILED,
+                      "triangle_exclamation", Lang::Sounds::OGG_EXCLAMATION);
+            }
             retry_count++;
             const bool use_cached_config_on_failure =
                 !waiting_for_activation &&
@@ -1943,9 +1989,9 @@ void Application::ShowActivationCode(const std::string& code, const std::string&
 void Application::ShowActivationStatus(const std::string& message, const char* emotion) {
     auto display = Board::GetInstance().GetDisplay();
     const char* detail = message.empty() ? Lang::Strings::PLEASE_WAIT : message.c_str();
-    display->ShowPersistentNotification(Lang::Strings::ACTIVATION, true);
-    display->ShowPersistentNotification(detail, false);
-    Alert(Lang::Strings::ACTIVATION, detail, emotion);
+    display->ShowActivationPrompt(detail);
+    display->SetStatus(Lang::Strings::ACTIVATION);
+    display->SetEmotion(emotion);
 }
 
 void Application::Alert(const char* status, const char* message, const char* emotion,
@@ -2547,6 +2593,7 @@ void Application::HandleMqttCommand(const char* json, int len) {
                         delete ctx;
 
                         int attempt = 0;
+                        TickType_t last_cloud_check_tick = 0;
                         while (app->GetDeviceState() == kDeviceStateActivating) {
                             auto& board = Board::GetInstance();
                             if (!board.IsBleBindModeActive()) {
@@ -2561,19 +2608,44 @@ void Application::HandleMqttCommand(const char* json, int len) {
                                 break;
                             }
 
-                            Ota ota;
-                            if (ota.CheckVersion() == ESP_OK &&
-                                !ota.HasActivationCode() && !ota.HasActivationChallenge()) {
-                                app->HandleRebindSuccess();
-                                break;
+                            const TickType_t now = xTaskGetTickCount();
+                            const bool should_check_cloud =
+                                !IsBleBindClientConnected() &&
+                                (last_cloud_check_tick == 0 ||
+                                 now - last_cloud_check_tick >=
+                                     pdMS_TO_TICKS(kBleBindCloudPollIntervalMs));
+                            if (should_check_cloud) {
+                                const bool paused_ble_for_check =
+                                    PauseBleBindModeBeforeCloudCheck(board);
+                                Ota ota;
+                                const bool rebind_done =
+                                    ota.CheckVersion() == ESP_OK && !ota.HasActivationCode() &&
+                                    !ota.HasActivationChallenge();
+                                last_cloud_check_tick = xTaskGetTickCount();
+                                if (rebind_done) {
+                                    app->HandleRebindSuccess();
+                                    break;
+                                }
+                                if (paused_ble_for_check &&
+                                    app->GetDeviceState() == kDeviceStateActivating &&
+                                    !board.EnterBleBindMode()) {
+                                    app->Schedule([app]() {
+                                        app->GetAudioService().Start();
+                                        app->SetDeviceState(kDeviceStateIdle);
+                                        app->Alert(Lang::Strings::ERROR,
+                                                   Lang::Strings::BLUFI_INIT_FAILED,
+                                                   "triangle_exclamation",
+                                                   Lang::Sounds::OGG_EXCLAMATION);
+                                    });
+                                    break;
+                                }
                             }
                             ++attempt;
                             if (attempt % kBleBindTimeoutNotifyAttempts == 0) {
                                 std::string notice = BuildBleBindTimeoutNotice();
                                 app->Schedule([notice = std::move(notice)]() {
                                     auto display = Board::GetInstance().GetDisplay();
-                                    display->ShowNotification(notice.c_str(),
-                                                              kBleBindTimeoutNoticeMs);
+                                    display->ShowActivationPrompt(notice.c_str());
                                 });
                                 vTaskDelay(pdMS_TO_TICKS(kBleBindTimeoutNoticeMs));
                                 app->Schedule([app]() {

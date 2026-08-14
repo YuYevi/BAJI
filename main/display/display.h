@@ -42,6 +42,7 @@ public:
     virtual void UpdateStatusBar(bool update_all = false);
     
     virtual void ShowActivationQrCode(const char* code) {}
+    virtual void ShowActivationPrompt(const char* message) {}
     virtual void HideActivationQrCode() {}
     
     virtual void ShowChargingFullscreen(bool show);

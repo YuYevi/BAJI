@@ -153,6 +153,10 @@ bool Blufi::IsProvisioning() const {
     return IsActive() && m_wifi_started;
 }
 
+bool Blufi::IsBleConnected() const {
+    return m_ble_is_connected.load();
+}
+
 void Blufi::SetProvisioningDoneCallback(std::function<void()> callback) {
     std::lock_guard<std::mutex> lock(m_callback_mutex);
     m_provisioning_done_callback = std::move(callback);

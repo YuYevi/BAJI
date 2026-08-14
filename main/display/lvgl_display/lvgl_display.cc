@@ -22,6 +22,21 @@
 #define TAG "Display"
 
 namespace {
+constexpr uint32_t kActivationPromptWaitIntervalMs = 550;
+constexpr const char* kActivationWaitingPrefix =
+    "\xE7\xAD\x89\xE5\xBE\x85\xE6\xBF\x80\xE6\xB4\xBB\xE4\xB8\xAD";
+
+void SetActivationWaitingText(lv_obj_t* label, uint8_t dot_count) {
+    if (label == nullptr) {
+        return;
+    }
+
+    const char* dots = dot_count == 1 ? "." : dot_count == 2 ? ".." : "...";
+    char buffer[64];
+    snprintf(buffer, sizeof(buffer), "%s%s", kActivationWaitingPrefix, dots);
+    lv_label_set_text(label, buffer);
+}
+
 const char* GetStartupNetworkModeIcon(Board& board, Application& app, const char* fallback_icon) {
     if (app.GetDeviceState() != kDeviceStateStarting) {
         return fallback_icon;
@@ -92,12 +107,18 @@ LvglDisplay::~LvglDisplay() {
         lv_obj_del(charging_fullscreen_);
         charging_fullscreen_ = nullptr;
     }
+    if (activation_prompt_wait_timer_ != nullptr) {
+        lv_timer_delete(activation_prompt_wait_timer_);
+        activation_prompt_wait_timer_ = nullptr;
+    }
     if (activation_qr_overlay_ != nullptr) {
         lv_obj_del(activation_qr_overlay_);
         activation_qr_overlay_ = nullptr;
         activation_qr_title_ = nullptr;
         activation_qr_hint_ = nullptr;
         activation_qr_code_ = nullptr;
+        activation_prompt_wait_label_ = nullptr;
+        activation_prompt_wait_dot_count_ = 0;
     }
     if (pm_lock_ != nullptr) {
         esp_pm_lock_delete(pm_lock_);
@@ -397,6 +418,80 @@ void LvglDisplay::SetPowerSaveMode(bool on) {
     }
 }
 
+void LvglDisplay::ShowActivationPrompt(const char* message) {
+    LvglDisplay::HideActivationQrCode();
+
+    DisplayLockGuard lock(this);
+
+    lv_obj_t* layer = lv_layer_top();
+    activation_qr_overlay_ = lv_obj_create(layer);
+    lv_obj_remove_style_all(activation_qr_overlay_);
+    lv_obj_set_size(activation_qr_overlay_, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(activation_qr_overlay_, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(activation_qr_overlay_, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(activation_qr_overlay_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_center(activation_qr_overlay_);
+    lv_obj_move_foreground(activation_qr_overlay_);
+
+    const lv_font_t* text_font = LV_FONT_DEFAULT;
+    const lv_font_t* icon_font = LV_FONT_DEFAULT;
+    if (current_theme_ != nullptr) {
+        auto* th = static_cast<LvglTheme*>(current_theme_);
+        if (th->text_font() != nullptr) {
+            text_font = th->text_font()->font();
+        }
+        if (th->large_icon_font() != nullptr) {
+            icon_font = th->large_icon_font()->font();
+        }
+    }
+
+    activation_qr_title_ = lv_label_create(activation_qr_overlay_);
+    lv_label_set_text(activation_qr_title_, Lang::Strings::ACTIVATION);
+    lv_obj_set_style_text_color(activation_qr_title_, lv_color_black(), 0);
+    lv_obj_set_style_text_font(activation_qr_title_, text_font, 0);
+    lv_obj_align(activation_qr_title_, LV_ALIGN_TOP_MID, 0, 36);
+
+    activation_qr_code_ = lv_label_create(activation_qr_overlay_);
+    lv_label_set_text(activation_qr_code_, FONT_AWESOME_BLUETOOTH);
+    lv_obj_set_style_text_color(activation_qr_code_, lv_color_black(), 0);
+    lv_obj_set_style_text_font(activation_qr_code_, icon_font, 0);
+    lv_obj_align(activation_qr_code_, LV_ALIGN_CENTER, 0, -lv_font_get_line_height(text_font));
+
+    activation_qr_hint_ = lv_label_create(activation_qr_overlay_);
+    lv_label_set_text(activation_qr_hint_,
+                      (message != nullptr && message[0] != '\0') ? message : Lang::Strings::PLEASE_WAIT);
+    lv_obj_set_style_text_color(activation_qr_hint_, lv_color_black(), 0);
+    lv_obj_set_style_text_font(activation_qr_hint_, text_font, 0);
+    lv_obj_set_style_text_align(activation_qr_hint_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(activation_qr_hint_, LV_HOR_RES * 0.85);
+    lv_label_set_long_mode(activation_qr_hint_, LV_LABEL_LONG_WRAP);
+    lv_obj_align_to(activation_qr_hint_, activation_qr_code_, LV_ALIGN_OUT_BOTTOM_MID, 0, 18);
+
+    activation_prompt_wait_dot_count_ = 1;
+    activation_prompt_wait_label_ = lv_label_create(activation_qr_overlay_);
+    SetActivationWaitingText(activation_prompt_wait_label_, activation_prompt_wait_dot_count_);
+    lv_obj_set_style_text_color(activation_prompt_wait_label_, lv_color_black(), 0);
+    lv_obj_set_style_text_font(activation_prompt_wait_label_, text_font, 0);
+    lv_obj_set_style_text_align(activation_prompt_wait_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(activation_prompt_wait_label_, LV_HOR_RES * 0.85);
+    lv_label_set_long_mode(activation_prompt_wait_label_, LV_LABEL_LONG_CLIP);
+    lv_obj_align(activation_prompt_wait_label_, LV_ALIGN_BOTTOM_MID, 0, -36);
+
+    activation_prompt_wait_timer_ = lv_timer_create(
+        [](lv_timer_t* timer) {
+            auto* display = static_cast<LvglDisplay*>(lv_timer_get_user_data(timer));
+            if (display == nullptr || display->activation_prompt_wait_label_ == nullptr) {
+                return;
+            }
+
+            display->activation_prompt_wait_dot_count_ =
+                display->activation_prompt_wait_dot_count_ % 3 + 1;
+            SetActivationWaitingText(display->activation_prompt_wait_label_,
+                                     display->activation_prompt_wait_dot_count_);
+        },
+        kActivationPromptWaitIntervalMs, this);
+}
+
 void LvglDisplay::ShowActivationQrCode(const char* code) {
     DisplayLockGuard lock(this);
     
@@ -443,12 +538,18 @@ void LvglDisplay::ShowActivationQrCode(const char* code) {
 
 void LvglDisplay::HideActivationQrCode() {
     DisplayLockGuard lock(this);
+    if (activation_prompt_wait_timer_ != nullptr) {
+        lv_timer_delete(activation_prompt_wait_timer_);
+        activation_prompt_wait_timer_ = nullptr;
+    }
     if (activation_qr_overlay_ != nullptr) {
         lv_obj_del(activation_qr_overlay_);
         activation_qr_overlay_ = nullptr;
         activation_qr_title_ = nullptr;
         activation_qr_hint_ = nullptr;
         activation_qr_code_ = nullptr;
+        activation_prompt_wait_label_ = nullptr;
+        activation_prompt_wait_dot_count_ = 0;
     }
 }
 

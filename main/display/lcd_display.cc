@@ -47,7 +47,6 @@ extern "C" void baji_lcd_te_attach_display(lv_display_t* display) __attribute__(
 namespace {
 bool ShouldEnterSmartWatchAiChat(DeviceState state) {
     return state == kDeviceStateConnecting ||
-           state == kDeviceStateActivating ||
            state == kDeviceStateListening ||
            state == kDeviceStateSpeaking;
 }
@@ -858,7 +857,23 @@ void LcdDisplay::UpdateStatusBar(bool update_all) {
 }
 
 void LcdDisplay::ShowActivationQrCode(const char* code) {
+    if (smart_watch_ui_active_) {
+        DisplayLockGuard lock(this);
+        smartwatch_ui_runtime_show_top_notification("");
+        smartwatch_ui_runtime_show_notification("", 0);
+        smartwatch_ui_runtime_show_standby();
+    }
     LvglDisplay::ShowActivationQrCode(code);
+}
+
+void LcdDisplay::ShowActivationPrompt(const char* message) {
+    if (smart_watch_ui_active_) {
+        DisplayLockGuard lock(this);
+        smartwatch_ui_runtime_show_top_notification("");
+        smartwatch_ui_runtime_show_notification("", 0);
+        smartwatch_ui_runtime_show_standby();
+    }
+    LvglDisplay::ShowActivationPrompt(message);
 }
 
 void LcdDisplay::HideActivationQrCode() {

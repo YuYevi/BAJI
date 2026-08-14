@@ -25,6 +25,7 @@ public:
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void ShowChargingFullscreen(bool show) override;
     virtual void ShowActivationQrCode(const char* code) override;
+    virtual void ShowActivationPrompt(const char* message) override;
     virtual void HideActivationQrCode() override;
     virtual void SetPowerSaveMode(bool on);
     virtual bool SnapshotToJpeg(std::string& jpeg_data, int quality = 80);
@@ -51,6 +52,9 @@ protected:
     lv_obj_t* activation_qr_title_ = nullptr;
     lv_obj_t* activation_qr_hint_ = nullptr;
     lv_obj_t* activation_qr_code_ = nullptr;
+    lv_obj_t* activation_prompt_wait_label_ = nullptr;
+    lv_timer_t* activation_prompt_wait_timer_ = nullptr;
+    uint8_t activation_prompt_wait_dot_count_ = 0;
     
     const char* battery_icon_ = nullptr;
     const char* network_icon_ = nullptr;

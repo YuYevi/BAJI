@@ -265,11 +265,9 @@ bool WifiBoard::EnsureBleBindModeActive(BleSetupMode setup_mode, bool show_ui) {
         auto* display = GetDisplay();
         if (display != nullptr) {
             std::string hint = FormatBleBindHint(blufi.GetDeviceName());
-            display->ShowPersistentNotification(Lang::Strings::ACTIVATION, true);
-            display->ShowPersistentNotification(hint.c_str(), false);
+            display->ShowActivationPrompt(hint.c_str());
             display->SetStatus(Lang::Strings::ACTIVATION);
             display->SetEmotion("bluetooth");
-            display->SetChatMessage("system", hint.c_str());
         }
     }
     return true;

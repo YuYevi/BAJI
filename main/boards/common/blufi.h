@@ -45,6 +45,8 @@ public:
 
     bool IsProvisioning() const;
 
+    bool IsBleConnected() const;
+
     void SetProvisioningDoneCallback(std::function<void()> callback);
 
     const char *GetDeviceName() const;

@@ -75,6 +75,7 @@ public:
     virtual void ShowPersistentNotification(const char* notification, bool top = false) override;
     virtual void UpdateStatusBar(bool update_all = false) override;
     virtual void ShowActivationQrCode(const char* code) override;
+    virtual void ShowActivationPrompt(const char* message) override;
     virtual void HideActivationQrCode() override;
     virtual void SetPowerSaveMode(bool on) override;
     virtual void SetEmotion(const char* emotion) override;
