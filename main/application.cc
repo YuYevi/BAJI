@@ -1659,6 +1659,7 @@ void Application::HandleActivationDoneEvent() {
     auto display = Board::GetInstance().GetDisplay();
     display->HideActivationQrCode();
     audio_service_.PrewarmSpeechPipeline();
+    audio_service_.Start();
     std::string message = std::string(Lang::Strings::VERSION) + ota_->GetCurrentVersion();
     display->ShowNotification(message.c_str());
     display->SetChatMessage("system", "");
@@ -1684,8 +1685,15 @@ void Application::ActivationTask() {
     auto& board = Board::GetInstance();
     board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
 
-    CheckAssetsVersion();
+    while (GetDeviceState() == kDeviceStateActivating && board.IsWifiConfigModeActive()) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    if (GetDeviceState() != kDeviceStateActivating) {
+        return;
+    }
+
     CheckNewVersion();
+    CheckAssetsVersion();
     if (ota_->HasMqttControlConfig()) {
         MqttControl::GetInstance().Start();
     }

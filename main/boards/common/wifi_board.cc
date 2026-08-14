@@ -22,7 +22,7 @@
 #include "blufi.h"
 #endif
 
-static constexpr int CONNECT_TIMEOUT_SEC = 8;
+static constexpr int CONNECT_TIMEOUT_SEC = 15;
 static constexpr int BLUFI_AUDIO_STOP_TIMEOUT_MS = 5000;
 static const char* TAG = "WifiBoard";
 
@@ -413,7 +413,9 @@ void WifiBoard::StartWifiConfigMode(uint32_t expected_generation) {
                     in_config_mode_.store(false);
                     ClearWifiConfigNotifications();
                     OnNetworkEvent(NetworkEvent::WifiConfigModeExit);
-                    ResumeAudioAfterBlufi();
+                    if (Application::GetInstance().GetDeviceState() != kDeviceStateActivating) {
+                        ResumeAudioAfterBlufi();
+                    }
                 });
             });
 
@@ -610,6 +612,10 @@ void WifiBoard::ExitBleBindMode() {
 
 bool WifiBoard::IsBleBindModeActive() const {
     return ble_bind_mode_active_.load();
+}
+
+bool WifiBoard::IsWifiConfigModeActive() const {
+    return IsInWifiConfigMode();
 }
 
 void WifiBoard::EnterWifiConfigMode() {

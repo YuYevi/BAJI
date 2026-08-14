@@ -102,6 +102,7 @@ public:
     }
     virtual void ExitBleBindMode() {}
     virtual bool IsBleBindModeActive() const { return false; }
+    virtual bool IsWifiConfigModeActive() const { return false; }
     virtual bool GetAutoPowerSaveEnabled();
     virtual bool SetAutoPowerSaveEnabled(bool enabled);
 };

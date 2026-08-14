@@ -88,6 +88,7 @@ public:
         BleSetupMode setup_mode = BleSetupMode::BIND_ONLY) override;
     virtual void ExitBleBindMode() override;
     virtual bool IsBleBindModeActive() const override;
+    virtual bool IsWifiConfigModeActive() const override;
     
     
     void EnterWifiConfigMode();
