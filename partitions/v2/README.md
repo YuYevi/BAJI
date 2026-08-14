@@ -1,14 +1,15 @@
 # Version 2 Partition Table
 
-This version introduces significant improvements over v1 by adding an `assets` partition to support network-loadable content and optimizing partition layouts for different flash sizes.
+This version introduces significant improvements over v1 by adding an `assets` partition for packaged assets and a separate `remote_media` partition for downloaded JPG/MJPEG content, while optimizing partition layouts for different flash sizes.
 
 ## Key Changes from v1
 
 ### Major Improvements
-1. **Added Assets Partition**: New `assets` partition for network-loadable content
+1. **Added Assets Partition**: New `assets` partition for packaged and updatable assets
 2. **Replaced Model Partition**: The old `model` partition (960KB) is replaced with a larger `assets` partition
-3. **Optimized App Partitions**: Reduced application partition sizes to accommodate assets
-4. **Enhanced Flexibility**: Support for dynamic content updates without reflashing
+3. **Added Remote Media Partition**: New `remote_media` partition for downloaded JPG and MJPEG batches
+4. **Optimized App Partitions**: Reduced application partition sizes to accommodate assets
+5. **Enhanced Flexibility**: Support for dynamic content updates without reflashing
 
 ### Assets Partition Features
 The `assets` partition stores:
@@ -19,7 +20,7 @@ The `assets` partition stores:
   - Background images and UI elements
   - Custom emoji packs
   - Language configuration files
-- **Dynamic Content**: All content can be updated over-the-air via HTTP downloads
+- **Dynamic Content**: Asset packages can still be updated over-the-air via HTTP downloads
 
 ## Partition Layout Comparison
 
@@ -72,10 +73,10 @@ The `assets` partition stores:
 - `phy_init`: 4KB
 - `ota_0`: 4MB
 - `ota_1`: 4MB
-- `assets`: 16MB, logically divided into:
-  - 6MB firmware/system assets
-  - 5MB downloaded JPG wallpapers
-  - 5MB downloaded AI chat MJPEG files
+- `assets`: 8MB for firmware/system assets
+- `remote_media`: 14MB for network downloads, logically divided into:
+  - 8MB downloaded JPG wallpaper batches
+  - 6MB downloaded JPEG/MJPEG role media
 
 ## Benefits
 
@@ -88,12 +89,12 @@ The `assets` partition stores:
 
 ## Technical Details
 
-- **Partition Type**: Assets partition uses `spiffs` subtype for SPIFFS filesystem compatibility
+- **Partition Type**: Static and remote media partitions use `spiffs` subtype for flash compatibility
 - **Memory Mapping**: Assets are memory-mapped for efficient access during runtime
 - **Checksum Validation**: Built-in integrity checking ensures asset data validity
 - **Progressive Download**: Assets can be downloaded progressively with progress tracking
 - **Fallback Support**: Graceful fallback to default assets if network updates fail
-- **Persistent Remote Media**: Downloaded JPG and MJPEG regions survive reboot and are only
+- **Persistent Remote Media**: Downloaded JPG and JPEG/MJPEG batches survive reboot and are only
   replaced after a complete new download is ready
 
 ## Migration from v1
@@ -108,5 +109,5 @@ When upgrading from v1 to v2:
 
 - The `assets` partition size varies by configuration to optimize for different flash sizes
 - ESP32-C3 devices use a smaller assets partition (4MB) due to limited available mmap pages in the system
-- 32MB devices get the largest assets partition (16MB) for maximum content storage
+- 32MB devices get an 8MB static assets partition plus a 14MB remote media partition
 - All partition tables maintain proper alignment for optimal flash performance

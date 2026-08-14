@@ -24,7 +24,7 @@ SKIP_DEFAULT_EXTRA_FILES = {
     "NoSpeak.gif",
 }
 
-SYSTEM_ASSETS_REGION_SIZE = 6 * 1024 * 1024
+SYSTEM_ASSETS_REGION_SIZE = 8 * 1024 * 1024
 
 
 # =============================================================================

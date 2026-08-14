@@ -142,15 +142,15 @@ bool RemoteWallpaperStore::EnsurePartition() {
     }
 
     initialized_ = true;
-    partition_ =
-        esp_partition_find_first(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, "assets");
+    partition_ = esp_partition_find_first(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY,
+                                          RemoteAssetRegions::kRemoteMediaPartitionLabel);
     if (partition_ == nullptr) {
-        ESP_LOGW(kTag, "Assets partition not found");
+        ESP_LOGW(kTag, "Remote media partition not found");
         return false;
     }
 
-    if (partition_->size < RemoteAssetRegions::kRequiredAssetsPartitionSize) {
-        ESP_LOGW(kTag, "Assets partition size %u does not support the wallpaper region",
+    if (partition_->size < RemoteAssetRegions::kRequiredRemoteMediaPartitionSize) {
+        ESP_LOGW(kTag, "Remote media partition size %u does not support the wallpaper region",
                  static_cast<unsigned>(partition_->size));
         return false;
     }
