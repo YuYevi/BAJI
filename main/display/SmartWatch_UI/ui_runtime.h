@@ -64,6 +64,7 @@ void smartwatch_ui_runtime_mjpeg_player_destroy(smartwatch_ui_runtime_mjpeg_play
 bool smartwatch_ui_runtime_mjpeg_player_set_src(smartwatch_ui_runtime_mjpeg_player_t * player,
                                                 const uint8_t * data, size_t size);
 void smartwatch_ui_runtime_mjpeg_player_restart(smartwatch_ui_runtime_mjpeg_player_t * player);
+void smartwatch_ui_runtime_mjpeg_player_set_visible(smartwatch_ui_runtime_mjpeg_player_t * player, bool visible);
 bool smartwatch_ui_runtime_mjpeg_player_is_loaded(const smartwatch_ui_runtime_mjpeg_player_t * player);
 
 #ifdef __cplusplus

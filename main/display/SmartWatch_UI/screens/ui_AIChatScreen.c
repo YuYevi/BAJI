@@ -128,16 +128,17 @@ static void chat_refresh_mjpeg_state(void)
     bool speaking = smartwatch_ui_runtime_is_ai_speaking();
     if(!chat_get_status_mjpeg(speaking, &mjpeg_data, &mjpeg_size) || !mjpeg_data || mjpeg_size == 0) return;
 
-    if(g_chat_mjpeg_is_speaking != speaking) {
-        if(!smartwatch_ui_runtime_mjpeg_player_set_src(chat_mjpeg_player, mjpeg_data, mjpeg_size)) {
-            return;
-        }
+    if(g_chat_mjpeg_is_speaking == speaking) {
+        return;
+    }
+
+    if(!smartwatch_ui_runtime_mjpeg_player_set_src(chat_mjpeg_player, mjpeg_data, mjpeg_size)) {
+        return;
     }
 
     g_chat_mjpeg_is_speaking = speaking;
-    if(smartwatch_ui_runtime_mjpeg_player_is_loaded(chat_mjpeg_player)) {
-        smartwatch_ui_runtime_mjpeg_player_restart(chat_mjpeg_player);
-    }
+    smartwatch_ui_runtime_mjpeg_player_set_visible(chat_mjpeg_player,
+                                                     lv_screen_active() == ui_AIChatScreen);
 }
 
 static void chat_create_mjpeg_bg(void)
@@ -161,9 +162,8 @@ static void chat_create_mjpeg_bg(void)
 
     if(chat_mjpeg_player) {
         smartwatch_ui_runtime_mjpeg_player_set_src(chat_mjpeg_player, mjpeg_data, mjpeg_size);
-    }
-    if(smartwatch_ui_runtime_mjpeg_player_is_loaded(chat_mjpeg_player)) {
-        smartwatch_ui_runtime_mjpeg_player_restart(chat_mjpeg_player);
+        smartwatch_ui_runtime_mjpeg_player_set_visible(chat_mjpeg_player,
+                                                         lv_screen_active() == ui_AIChatScreen);
     }
 }
 
@@ -207,8 +207,13 @@ static void chat_refresh_messages(void)
 
 static void chat_screen_event_cb(lv_event_t * e)
 {
-    if(lv_event_get_code(e) != LV_EVENT_SCREEN_LOADED) return;
-    smartwatch_ui_runtime_refresh_wake_word_detection();
+    lv_event_code_t code = lv_event_get_code(e);
+    if(code == LV_EVENT_SCREEN_LOADED) {
+        smartwatch_ui_runtime_mjpeg_player_set_visible(chat_mjpeg_player, true);
+        smartwatch_ui_runtime_refresh_wake_word_detection();
+    } else if(code == LV_EVENT_SCREEN_UNLOADED) {
+        smartwatch_ui_runtime_mjpeg_player_set_visible(chat_mjpeg_player, false);
+    }
 }
 
 /**
@@ -226,6 +231,7 @@ void ui_AIChatScreen_init(void)
     lv_obj_add_flag(ui_AIChatScreen, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(ui_AIChatScreen, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(ui_AIChatScreen, chat_screen_event_cb, LV_EVENT_SCREEN_LOADED, NULL);
+    lv_obj_add_event_cb(ui_AIChatScreen, chat_screen_event_cb, LV_EVENT_SCREEN_UNLOADED, NULL);
 
     chat_mjpeg_bg = NULL;
     chat_mjpeg_player = NULL;

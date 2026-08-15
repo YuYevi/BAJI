@@ -112,12 +112,15 @@ void AfeAudioProcessor::Start() {
 
 void AfeAudioProcessor::Stop() {
     xEventGroupClearBits(event_group_, PROCESSOR_RUNNING);
+    control_generation_.fetch_add(1);
+    output_reset_pending_.store(true);
 
     std::lock_guard<std::mutex> lock(input_buffer_mutex_);
-    if (afe_data_ != nullptr) {
-        afe_iface_->reset_buffer(afe_data_);
-    }
     input_buffer_.clear();
+    if (afe_data_ != nullptr) {
+        // AudioProcessorTask owns fetch/reset access to the AFE instance.
+        reset_pending_.store(true);
+    }
 }
 
 bool AfeAudioProcessor::IsRunning() {
@@ -132,12 +135,49 @@ void AfeAudioProcessor::OnVadStateChange(std::function<void(bool speaking)> call
     vad_state_change_callback_ = callback;
 }
 
+void AfeAudioProcessor::ApplyPendingReset() {
+    if (!reset_pending_.exchange(false)) {
+        return;
+    }
+
+    // Serialize reset against Feed(); fetch/reset are both owned by this task.
+    std::lock_guard<std::mutex> lock(input_buffer_mutex_);
+    input_buffer_.clear();
+    if (afe_data_ != nullptr) {
+        afe_iface_->reset_buffer(afe_data_);
+    }
+}
+
+void AfeAudioProcessor::ApplyPendingOutputReset() {
+    if (!output_reset_pending_.exchange(false)) {
+        return;
+    }
+
+    output_buffer_.clear();
+    is_speaking_ = false;
+}
+
 void AfeAudioProcessor::AudioProcessorTask() {
     while (true) {
         xEventGroupWaitBits(event_group_, PROCESSOR_RUNNING, pdFALSE, pdTRUE, portMAX_DELAY);
 
-        auto res = afe_iface_->fetch_with_delay(afe_data_, portMAX_DELAY);
+        ApplyPendingReset();
+        ApplyPendingOutputReset();
         if ((xEventGroupGetBits(event_group_) & PROCESSOR_RUNNING) == 0) {
+            continue;
+        }
+
+        const uint32_t generation = control_generation_.load();
+        // This processor is a separate AFE instance from wake-word detection.
+        // A bounded wait lets the fetch-owning task observe Stop() and apply a
+        // deferred reset even when microphone feeding has stopped completely.
+        auto res = afe_iface_->fetch_with_delay(afe_data_, pdMS_TO_TICKS(100));
+        if (generation != control_generation_.load() ||
+            (xEventGroupGetBits(event_group_) & PROCESSOR_RUNNING) == 0) {
+            // Stop/Start may release an old blocked fetch after a new session
+            // has already started. Reset the AFE and discard that stale frame.
+            ApplyPendingReset();
+            ApplyPendingOutputReset();
             continue;
         }
         if (res == nullptr || res->ret_value == ESP_FAIL) {

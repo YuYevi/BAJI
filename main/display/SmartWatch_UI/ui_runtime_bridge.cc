@@ -588,6 +588,21 @@ extern "C" void smartwatch_ui_runtime_mjpeg_player_restart(smartwatch_ui_runtime
     lv_timer_reset(player->timer);
 }
 
+extern "C" void smartwatch_ui_runtime_mjpeg_player_set_visible(smartwatch_ui_runtime_mjpeg_player_t * player,
+                                                                  bool visible)
+{
+    if (player == nullptr || player->timer == nullptr) {
+        return;
+    }
+
+    if (visible) {
+        lv_timer_resume(player->timer);
+        lv_timer_reset(player->timer);
+    } else {
+        lv_timer_pause(player->timer);
+    }
+}
+
 extern "C" bool smartwatch_ui_runtime_mjpeg_player_is_loaded(const smartwatch_ui_runtime_mjpeg_player_t * player)
 {
     return player != nullptr && player->loaded && player->frame_data != nullptr;

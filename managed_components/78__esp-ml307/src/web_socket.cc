@@ -146,12 +146,9 @@ bool WebSocket::Connect(const char* uri) {
     }
     request += "\r\n";
 
-    if (tcp_->Send(request) < 0) {
-        ESP_LOGE(TAG, "Failed to send WebSocket handshake request");
-        return false;
-    }
-
-    // 清除事件位
+    // Arm the receive path before sending the Upgrade request. Cellular TCP
+    // responses can arrive immediately; registering afterwards loses a fast
+    // handshake and makes Connect wait for the full timeout.
     xEventGroupClearBits(handshake_event_group_, HANDSHAKE_SUCCESS_BIT | HANDSHAKE_FAILED_BIT);
     
     // 设置数据接收回调来处理握手和后续的WebSocket帧
@@ -168,6 +165,11 @@ bool WebSocket::Connect(const char* uri) {
             }
         }
     });
+
+    if (tcp_->Send(request) < 0) {
+        ESP_LOGE(TAG, "Failed to send WebSocket handshake request");
+        return false;
+    }
 
     // 等待握手完成，超时时间10秒
     EventBits_t bits = xEventGroupWaitBits(

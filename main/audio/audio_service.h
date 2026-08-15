@@ -78,6 +78,7 @@ struct AudioServiceCallbacks {
     std::function<void(const std::string&)> on_wake_word_detected;
     std::function<void(bool)> on_vad_change;
     std::function<void(void)> on_audio_testing_queue_full;
+    std::function<void(void)> on_playback_drained;
 };
 
 
@@ -90,7 +91,7 @@ enum AudioTaskType {
 struct AudioTask {
     AudioTaskType type;
     std::vector<int16_t> pcm;
-    uint32_t timestamp;
+    uint32_t timestamp = 0;
 };
 
 struct DebugStatistics {
@@ -98,6 +99,7 @@ struct DebugStatistics {
     uint32_t decode_count = 0;
     uint32_t encode_count = 0;
     uint32_t playback_count = 0;
+    uint32_t encode_drop_count = 0;
 };
 
 class AudioService {
@@ -114,6 +116,7 @@ public:
     const std::string& GetLastWakeWord() const;
     bool IsVoiceDetected() const { return voice_detected_; }
     bool IsIdle();
+    bool IsPlaybackIdle();
     bool WaitForPlaybackQueueEmpty(int timeout_ms = 5000);
     bool IsWakeWordRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_WAKE_WORD_RUNNING; }
     bool IsAudioProcessorRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_AUDIO_PROCESSOR_RUNNING; }
@@ -131,6 +134,7 @@ public:
 
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
+    bool HasPendingSendPackets();
     void PlaySound(const std::string_view& sound);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
@@ -175,6 +179,10 @@ private:
     std::deque<std::unique_ptr<AudioStreamPacket>> audio_testing_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_encode_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_playback_queue_;
+    bool decode_in_flight_ = false;
+    bool output_in_flight_ = false;
+    bool playback_drained_notified_ = true;
+    uint32_t playback_generation_ = 0;
     
     std::deque<uint32_t> timestamp_queue_;
 
@@ -183,6 +191,7 @@ private:
     bool voice_detected_ = false;
     std::atomic_bool service_stopped_{true};
     bool audio_input_need_warmup_ = false;
+    int64_t last_encode_drop_log_time_ = 0;
 
     esp_timer_handle_t audio_power_timer_ = nullptr;
     std::chrono::steady_clock::time_point last_input_time_;
@@ -196,6 +205,8 @@ private:
     static void OpusCodecTaskEntry(void* arg);
     void PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm);
     void SetDecodeSampleRate(int sample_rate, int frame_duration);
+    bool IsPlaybackDrainedLocked() const;
+    bool MarkPlaybackDrainedLocked();
     void CheckAndUpdateAudioPowerState();
 };
 

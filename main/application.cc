@@ -1168,6 +1168,9 @@ void Application::Initialize() {
     callbacks.on_vad_change = [this](bool speaking) {
         xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
     };
+    callbacks.on_playback_drained = [this]() {
+        xEventGroupSetBits(event_group_, MAIN_EVENT_PLAYBACK_DRAINED);
+    };
     audio_service_.SetCallbacks(callbacks);
 
     state_machine_.AddStateChangeListener([this](DeviceState old_state, DeviceState new_state) {
@@ -1279,7 +1282,7 @@ void Application::Run() {
                                    MAIN_EVENT_NETWORK_CONNECTED | MAIN_EVENT_NETWORK_DISCONNECTED |
                                    MAIN_EVENT_TOGGLE_CHAT | MAIN_EVENT_START_LISTENING |
                                    MAIN_EVENT_STOP_LISTENING | MAIN_EVENT_ACTIVATION_DONE |
-                                   MAIN_EVENT_STATE_CHANGED;
+                                   MAIN_EVENT_STATE_CHANGED | MAIN_EVENT_PLAYBACK_DRAINED;
 
     while (true) {
         // 等待事件组中的位，直到有事件发生
@@ -1338,6 +1341,14 @@ void Application::Run() {
             HandleStateChangedEvent();
         }
 
+        if (bits & MAIN_EVENT_PLAYBACK_DRAINED) {
+            if (pending_listening_start_ && GetDeviceState() == kDeviceStateListening &&
+                audio_service_.IsPlaybackIdle()) {
+                pending_listening_start_ = false;
+                StartListeningAudio();
+            }
+        }
+
         if (bits & MAIN_EVENT_TOGGLE_CHAT) {
             HandleToggleChatEvent();
         }
@@ -1352,10 +1363,24 @@ void Application::Run() {
 
         if (bits & MAIN_EVENT_SEND_AUDIO) {
             // 发送音频数据包
-            while (auto packet = audio_service_.PopPacketFromSendQueue()) {
-                if (protocol_ && !protocol_->SendAudio(std::move(packet))) {
+            constexpr size_t kMaxPacketsPerDispatch = 2;
+            size_t packets_sent = 0;
+            bool send_failed = false;
+            while (packets_sent < kMaxPacketsPerDispatch) {
+                auto packet = audio_service_.PopPacketFromSendQueue();
+                if (!packet) {
                     break;
                 }
+                if (protocol_ && !protocol_->SendAudio(std::move(packet))) {
+                    while (audio_service_.PopPacketFromSendQueue()) {
+                    }
+                    send_failed = true;
+                    break;
+                }
+                ++packets_sent;
+            }
+            if (!send_failed && audio_service_.HasPendingSendPackets()) {
+                xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);
             }
         }
 
@@ -2121,8 +2146,12 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
         return;
     }
 
+    auto& board = Board::GetInstance();
+    board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+
     if (!protocol_->IsAudioChannelOpened()) {
         if (!protocol_->OpenAudioChannel()) {
+            SetDeviceState(kDeviceStateIdle);
             return;
         }
     }
@@ -2228,9 +2257,12 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
         return;
     }
 
+    auto& board = Board::GetInstance();
+    board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+
     if (!protocol_->IsAudioChannelOpened()) {
         if (!protocol_->OpenAudioChannel()) {
-            RefreshWakeWordDetection();
+            SetDeviceState(kDeviceStateIdle);
             return;
         }
     }
@@ -2314,6 +2346,7 @@ void Application::ExitAiChatToStandby() {
 void Application::HandleStateChangedEvent() {
     DeviceState new_state = state_machine_.GetState();
     clock_ticks_ = 0;
+    pending_listening_start_ = false;
 
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
@@ -2372,23 +2405,14 @@ void Application::HandleStateChangedEvent() {
 #endif
 
             if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
-                if (listening_mode_ == kListeningModeAutoStop) {
-                    audio_service_.WaitForPlaybackQueueEmpty();
+                if (listening_mode_ == kListeningModeAutoStop &&
+                    !audio_service_.IsPlaybackIdle()) {
+                    pending_listening_start_ = true;
+                } else {
+                    StartListeningAudio();
                 }
-
-                protocol_->SendStartListening(listening_mode_);
-                audio_service_.EnableVoiceProcessing(true);
-            }
-
-#ifdef CONFIG_WAKE_WORD_DETECTION_IN_LISTENING
-            RefreshWakeWordDetection();
-#else
-            audio_service_.EnableWakeWordDetection(false);
-#endif
-
-            if (play_popup_on_listening_) {
-                play_popup_on_listening_ = false;
-                audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
+            } else {
+                ConfigureWakeWordForListening();
             }
             break;
         case kDeviceStateSpeaking:
@@ -2424,6 +2448,29 @@ void Application::HandleStateChangedEvent() {
             listening_silence_ticks_ = 0;
             break;
     }
+}
+
+void Application::StartListeningAudio() {
+    if (GetDeviceState() != kDeviceStateListening || protocol_ == nullptr) {
+        return;
+    }
+
+    protocol_->SendStartListening(listening_mode_);
+    audio_service_.EnableVoiceProcessing(true);
+    ConfigureWakeWordForListening();
+
+    if (play_popup_on_listening_) {
+        play_popup_on_listening_ = false;
+        audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
+    }
+}
+
+void Application::ConfigureWakeWordForListening() {
+#ifdef CONFIG_WAKE_WORD_DETECTION_IN_LISTENING
+    RefreshWakeWordDetection();
+#else
+    audio_service_.EnableWakeWordDetection(false);
+#endif
 }
 
 void Application::Schedule(std::function<void()>&& callback) {

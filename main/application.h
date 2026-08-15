@@ -35,6 +35,7 @@ class AudioCodec;
 #define MAIN_EVENT_START_LISTENING      (1 << 10)
 #define MAIN_EVENT_STOP_LISTENING       (1 << 11)
 #define MAIN_EVENT_STATE_CHANGED        (1 << 12)
+#define MAIN_EVENT_PLAYBACK_DRAINED     (1 << 13)
 
 enum AecMode {
     kAecOff,
@@ -117,6 +118,7 @@ private:
     bool assets_version_checked_ = false;
     bool startup_activation_completed_ = false;
     bool play_popup_on_listening_ = false;
+    bool pending_listening_start_ = false;
     bool keep_ai_chat_visible_on_idle_ = false;
     std::atomic<bool> reboot_in_progress_{false};
     std::atomic<uint32_t> protocol_generation_{0};
@@ -145,6 +147,8 @@ private:
     void HandleWakeWordDetectedEvent();
     void ContinueOpenAudioChannel(ListeningMode mode);
     void ContinueWakeWordInvoke(const std::string& wake_word);
+    void StartListeningAudio();
+    void ConfigureWakeWordForListening();
     void ShowPendingIdleNotification(Display* display);
 
     void ActivationTask();
