@@ -2259,6 +2259,16 @@ void Application::RefreshWakeWordDetection() {
 }
 
 void Application::ExitAiChatToStandby() {
+    const auto state = GetDeviceState();
+    const bool is_ai_runtime_state =
+        state == kDeviceStateIdle || state == kDeviceStateConnecting ||
+        state == kDeviceStateListening || state == kDeviceStateSpeaking;
+    // UI navigation posts this call asynchronously. Ignore a stale AI-chat exit
+    // after another flow has already entered activation, provisioning, or upgrade.
+    if (!is_ai_runtime_state) {
+        return;
+    }
+
     play_popup_on_listening_ = false;
     keep_ai_chat_visible_on_idle_ = false;
     idle_assistant_message_.clear();
@@ -2272,7 +2282,9 @@ void Application::ExitAiChatToStandby() {
         protocol_->CloseAudioChannel(false);
     }
 
-    SetDeviceState(kDeviceStateIdle);
+    if (state != kDeviceStateIdle) {
+        SetDeviceState(kDeviceStateIdle);
+    }
 }
 
 /**
@@ -2589,6 +2601,7 @@ void Application::HandleMqttCommand(const char* json, int len) {
             audio_service_.Stop();
             if (!audio_service_.WaitForStopped(5000)) {
                 g_ble_bind_wait_in_progress = false;
+                board.GetDisplay()->HideActivationQrCode();
                 SetDeviceState(kDeviceStateIdle);
                 Alert(Lang::Strings::ERROR, Lang::Strings::BLUFI_INIT_FAILED,
                       "triangle_exclamation", Lang::Sounds::OGG_EXCLAMATION);
@@ -2600,6 +2613,7 @@ void Application::HandleMqttCommand(const char* json, int len) {
             if (!board.EnterBleBindMode()) {
                 g_ble_bind_wait_in_progress = false;
                 board.ExitBleBindMode();
+                board.GetDisplay()->HideActivationQrCode();
                 audio_service_.Start();
                 SetDeviceState(kDeviceStateIdle);
                 Alert(Lang::Strings::ERROR, Lang::Strings::BLUFI_INIT_FAILED,
@@ -2628,6 +2642,7 @@ void Application::HandleMqttCommand(const char* json, int len) {
                             auto& board = Board::GetInstance();
                             if (!board.IsBleBindModeActive()) {
                                 app->Schedule([app]() {
+                                    Board::GetInstance().GetDisplay()->HideActivationQrCode();
                                     app->GetAudioService().Start();
                                     app->SetDeviceState(kDeviceStateIdle);
                                     app->Alert(Lang::Strings::ERROR,
@@ -2670,6 +2685,8 @@ void Application::HandleMqttCommand(const char* json, int len) {
                                     app->GetDeviceState() == kDeviceStateActivating &&
                                     !board.EnterBleBindMode()) {
                                     app->Schedule([app]() {
+                                        auto display = Board::GetInstance().GetDisplay();
+                                        display->HideActivationQrCode();
                                         app->GetAudioService().Start();
                                         app->SetDeviceState(kDeviceStateIdle);
                                         app->Alert(Lang::Strings::ERROR,
@@ -2683,7 +2700,11 @@ void Application::HandleMqttCommand(const char* json, int len) {
                             ++attempt;
                             if (attempt % kBleBindTimeoutNotifyAttempts == 0) {
                                 std::string notice = BuildBleBindTimeoutNotice();
-                                app->Schedule([notice = std::move(notice)]() {
+                                app->Schedule([app, notice = std::move(notice)]() {
+                                    if (app->GetDeviceState() != kDeviceStateActivating ||
+                                        !g_ble_bind_wait_in_progress.load()) {
+                                        return;
+                                    }
                                     auto display = Board::GetInstance().GetDisplay();
                                     display->ShowActivationPrompt(notice.c_str());
                                 });
@@ -2704,6 +2725,7 @@ void Application::HandleMqttCommand(const char* json, int len) {
                 delete ctx;
                 g_ble_bind_wait_in_progress = false;
                 board.ExitBleBindMode();
+                board.GetDisplay()->HideActivationQrCode();
                 audio_service_.Start();
                 SetDeviceState(kDeviceStateIdle);
                 Alert(Lang::Strings::ERROR, Lang::Strings::BLUFI_INIT_FAILED,
