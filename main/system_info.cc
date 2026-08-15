@@ -10,7 +10,7 @@
 #include <esp_ota_ops.h>
 #include <esp_heap_caps.h>
 #include <esp_pm.h>
-#include <vector>
+#include <esp_task_wdt.h>
 #if CONFIG_IDF_TARGET_ESP32P4
 #include "esp_wifi_remote.h"
 #endif
@@ -19,19 +19,61 @@
 
 namespace {
 
-size_t GetPartitionUsedSize(const esp_partition_t* partition) {
-    if (partition == nullptr || partition->size == 0) {
+constexpr size_t kPreferredScanChunkSize = 16 * 1024;
+constexpr size_t kMinimumScanChunkSize = 1024;
+constexpr TickType_t kSchedulerCooperateInterval = pdMS_TO_TICKS(50);
+
+uint8_t* AllocateScanBuffer(size_t& buffer_size) {
+    constexpr uint32_t kCapabilitySets[] = {
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT,
+        MALLOC_CAP_8BIT,
+    };
+
+    for (uint32_t capabilities : kCapabilitySets) {
+        for (buffer_size = kPreferredScanChunkSize; buffer_size >= kMinimumScanChunkSize;
+             buffer_size /= 2) {
+            auto* buffer = static_cast<uint8_t*>(heap_caps_malloc(buffer_size, capabilities));
+            if (buffer != nullptr) {
+                return buffer;
+            }
+        }
+    }
+
+    buffer_size = 0;
+    return nullptr;
+}
+
+void CooperateWithScheduler(TickType_t& last_cooperate_tick) {
+    if (xTaskGetSchedulerState() != taskSCHEDULER_RUNNING) {
+        return;
+    }
+
+    const TickType_t now = xTaskGetTickCount();
+    if (now - last_cooperate_tick < kSchedulerCooperateInterval) {
+        return;
+    }
+
+#if CONFIG_ESP_TASK_WDT_EN
+    if (esp_task_wdt_status(nullptr) == ESP_OK) {
+        (void)esp_task_wdt_reset();
+    }
+#endif
+    vTaskDelay(1);
+    last_cooperate_tick = xTaskGetTickCount();
+}
+
+size_t GetPartitionUsedSize(const esp_partition_t* partition, uint8_t* buffer,
+                            size_t buffer_size, TickType_t& last_cooperate_tick) {
+    if (partition == nullptr || partition->size == 0 || buffer == nullptr || buffer_size == 0) {
         return 0;
     }
 
-    constexpr size_t kScanChunkSize = 1024;
-    std::vector<uint8_t> buffer(kScanChunkSize);
     size_t remaining = partition->size;
 
     while (remaining > 0) {
-        const size_t chunk_size = remaining >= kScanChunkSize ? kScanChunkSize : remaining;
+        const size_t chunk_size = remaining >= buffer_size ? buffer_size : remaining;
         const size_t offset = remaining - chunk_size;
-        if (esp_partition_read(partition, offset, buffer.data(), chunk_size) != ESP_OK) {
+        if (esp_partition_read(partition, offset, buffer, chunk_size) != ESP_OK) {
             ESP_LOGW(TAG, "Failed to read partition %s at offset %u", partition->label,
                      static_cast<unsigned>(offset));
             return 0;
@@ -44,6 +86,7 @@ size_t GetPartitionUsedSize(const esp_partition_t* partition) {
         }
 
         remaining = offset;
+        CooperateWithScheduler(last_cooperate_tick);
     }
 
     return 0;
@@ -61,16 +104,26 @@ size_t SystemInfo::GetFlashSize() {
 }
 
 size_t SystemInfo::GetFlashUsedSize() {
+    size_t buffer_size = 0;
+    uint8_t* buffer = AllocateScanBuffer(buffer_size);
+    if (buffer == nullptr) {
+        ESP_LOGW(TAG, "Failed to allocate flash scan buffer");
+        return 0;
+    }
+
     size_t used_size = 0;
+    TickType_t last_cooperate_tick = xTaskGetTickCount();
     esp_partition_iterator_t it =
         esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, nullptr);
     while (it != nullptr) {
         const esp_partition_t* partition = esp_partition_get(it);
         if (partition != nullptr) {
-            used_size += GetPartitionUsedSize(partition);
+            used_size += GetPartitionUsedSize(partition, buffer, buffer_size, last_cooperate_tick);
         }
         it = esp_partition_next(it);
     }
+
+    heap_caps_free(buffer);
     return used_size;
 }
 
