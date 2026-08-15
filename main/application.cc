@@ -1413,8 +1413,9 @@ void Application::Run() {
  * @brief 处理网络连接事件
  * 
  * 当网络连接成功时触发，根据当前设备状态执行不同的操作：
- * - Starting/WifiConfiguring: 启动激活任务
- * - Idle且无协议: 重启协议连接
+ * - 首次联网完成: 启动激活任务
+ * - 运行时配网完成: 恢复 Idle 状态
+ * - Idle 且无协议: 重启协议连接
  */
 void Application::HandleNetworkConnectedEvent() {
     auto state = GetDeviceState();
@@ -1457,8 +1458,22 @@ void Application::HandleNetworkConnectedEvent() {
                   Lang::Sounds::OGG_EXCLAMATION);
             SetDeviceState(kDeviceStateIdle);
         }
-    } else if (state == kDeviceStateIdle && protocol_ == nullptr) {
-        RestartProtocolFromSettings();
+    } else {
+        auto& board = Board::GetInstance();
+        // Runtime reprovisioning clears the protocol before BLUFI starts. Wait
+        // for the managed station to reconnect before leaving the config state.
+        const bool runtime_wifi_provisioning_completed =
+            startup_activation_completed_ &&
+            state == kDeviceStateWifiConfiguring &&
+            !board.IsWifiConfigModeActive();
+        if (runtime_wifi_provisioning_completed) {
+            SetDeviceState(kDeviceStateIdle);
+            state = GetDeviceState();
+        }
+
+        if (state == kDeviceStateIdle && protocol_ == nullptr) {
+            RestartProtocolFromSettings();
+        }
     }
 
     auto display = Board::GetInstance().GetDisplay();
