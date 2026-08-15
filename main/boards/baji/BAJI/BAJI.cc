@@ -26,6 +26,7 @@
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_st77916.h>
+#include <esp_task_wdt.h>
 #include <esp_timer.h>
 #include <iot_button.h>
 #include <button_types.h>
@@ -50,6 +51,7 @@
 #include "esp_io_expander.h"
 #include "esp_io_expander_gpio_wrapper.h"
 #include "power_manager.h"
+#include "power_recovery_rtc.h"
 #include "power_save_timer.h"
 #include "baji_185_bringup.h"
 #include "axp2101.h"
@@ -588,12 +590,22 @@ class CustomBoard : public WifiBoard {
 private:
     static constexpr uint8_t kAutoPowerTargetBrightness = 30;
     static constexpr uint8_t kAutoPowerTargetVolume = 30;
+    static constexpr uint32_t kLvglWatchdogPeriodMs = 1000;
+    static constexpr uint32_t kLvglWatchdogLockTimeoutMs = 2000;
+    static constexpr uint32_t kStableApplicationClockTicks =
+        (POWER_RECOVERY_STABLE_UPTIME_MS + 999) / 1000;
     i2c_master_bus_handle_t i2c_bus_;           ///< I2C总线句柄
     LcdDisplay* display_;                        ///< 显示设备指针
     button_handle_t vol_up_handle_ = nullptr;    ///< 音量+按键句柄
     button_handle_t vol_down_handle_ = nullptr;  ///< 音量-按键句柄
     PowerSaveTimer* power_save_timer_;           ///< 省电定时器
     PowerManager* power_manager_;                ///< 电源管理器
+#if CONFIG_ESP_TASK_WDT_EN
+    esp_task_wdt_user_handle_t lvgl_watchdog_user_ = nullptr;
+    lv_timer_t* lvgl_watchdog_timer_ = nullptr;
+#endif
+    uint32_t application_clock_ticks_ = 0;
+    bool recovery_marked_stable_ = false;
     static CustomBoard* instance_;               ///< 单例实例
     bool pending_4g_switch_ = false;             ///< 待处理的4G切换请求
     bool fourg_power_on_ = false;                ///< 4G模块电源状态
@@ -636,6 +648,48 @@ private:
         auto self = static_cast<CustomBoard*>(arg);
         self->pending_4g_switch_ = false;
     }
+
+#if CONFIG_ESP_TASK_WDT_EN
+    static void LvglWatchdogTimerCb(lv_timer_t* timer) {
+        auto* self = static_cast<CustomBoard*>(lv_timer_get_user_data(timer));
+        if (self != nullptr && self->lvgl_watchdog_user_ != nullptr) {
+            (void)esp_task_wdt_reset_user(self->lvgl_watchdog_user_);
+        }
+    }
+
+    void StartLvglWatchdog() {
+        if (lvgl_watchdog_user_ != nullptr) {
+            return;
+        }
+
+        if (!lvgl_port_lock(kLvglWatchdogLockTimeoutMs)) {
+            ESP_LOGE(TAG, "Timed out while installing LVGL watchdog timer");
+            return;
+        }
+
+        lvgl_watchdog_timer_ =
+            lv_timer_create(LvglWatchdogTimerCb, kLvglWatchdogPeriodMs, this);
+        if (lvgl_watchdog_timer_ == nullptr) {
+            ESP_LOGE(TAG, "Failed to create LVGL watchdog timer");
+            lvgl_port_unlock();
+            return;
+        }
+
+        esp_task_wdt_user_handle_t user = nullptr;
+        esp_err_t err = esp_task_wdt_add_user("baji_lvgl", &user);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to add LVGL watchdog user: %s", esp_err_to_name(err));
+            lv_timer_delete(lvgl_watchdog_timer_);
+            lvgl_watchdog_timer_ = nullptr;
+            lvgl_port_unlock();
+            return;
+        }
+
+        lvgl_watchdog_user_ = user;
+        (void)esp_task_wdt_reset_user(user);
+        lvgl_port_unlock();
+    }
+#endif
 
     NetFlowState GetNetFlowState() const {
         return net_flow_state_.load();
@@ -1480,14 +1534,6 @@ private:
                 power_save_timer_->SetEnabled(true);
             }
         });
-        power_manager_->OnPowerUi([this](PowerUiHint hint) {
-            if (hint == PowerUiHint::ShuttingDown) {
-                GetDisplay()->ShowNotification("正在关机...", 2000);
-                if (auto* backlight = GetBacklight(); backlight != nullptr) {
-                    backlight->SetBrightness(0);
-                }
-            }
-        });
         power_manager_->OnPowerSingleClick([this]() {
             Application::GetInstance().Schedule([this]() {
                 if (power_save_timer_) {
@@ -1675,6 +1721,24 @@ public:
         }
 
         InitializeButtons();
+    }
+
+    void OnApplicationReady() override {
+#if CONFIG_ESP_TASK_WDT_EN
+        StartLvglWatchdog();
+#endif
+    }
+
+    void OnApplicationClockTick() override {
+        if (recovery_marked_stable_) {
+            return;
+        }
+
+        if (++application_clock_ticks_ >= kStableApplicationClockTicks) {
+            baji_power_recovery_mark_stable();
+            recovery_marked_stable_ = true;
+            ESP_LOGI(TAG, "Application stable; cleared fault reset counter");
+        }
     }
 
     std::string GetDeviceRole() override {

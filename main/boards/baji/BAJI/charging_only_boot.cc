@@ -3,6 +3,8 @@
 #include "charging_boot_rtc.h"
 #include "abnormal_reporter.h"
 #include "baji_185_bringup.h"
+#include "power_latch.h"
+#include "power_recovery_rtc.h"
 
 #include "display/lcd_display.h"
 #include "backlight.h"
@@ -17,13 +19,7 @@
 
 static void InitPowerKeyPin(void)
 {
-    gpio_config_t io = {};
-    io.intr_type = GPIO_INTR_DISABLE;
-    io.mode = GPIO_MODE_INPUT;
-    io.pin_bit_mask = (1ULL << Power_Dec);
-    io.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    io.pull_up_en = GPIO_PULLUP_ENABLE;
-    gpio_config(&io);
+    baji_power::ConfigurePowerKeyInput();
 }
 
 static void InitV5mDetectPin(void)
@@ -49,14 +45,7 @@ static bool IsV5mPresent(void)
 
 static void LatchPowerControlOn(void)
 {
-    gpio_config_t po = {};
-    po.intr_type = GPIO_INTR_DISABLE;
-    po.mode = GPIO_MODE_OUTPUT;
-    po.pin_bit_mask = (1ULL << Power_Control);
-    po.pull_down_en = GPIO_PULLDOWN_ENABLE;
-    po.pull_up_en = GPIO_PULLUP_DISABLE;
-    gpio_config(&po);
-    gpio_set_level(Power_Control, 1);
+    baji_power::KeepPowerOnAcrossReset();
 }
 
 
@@ -64,22 +53,9 @@ static void ChargingOnlyPowerOffDeepSleep(void)
 {
     gpio_set_level(DISPLAY_BACKLIGHT_PIN, 0);
 
-    gpio_config_t wake_in = {};
-    wake_in.intr_type = GPIO_INTR_DISABLE;
-    wake_in.mode = GPIO_MODE_INPUT;
-    wake_in.pin_bit_mask = (1ULL << Power_Dec);
-    wake_in.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    wake_in.pull_up_en = GPIO_PULLUP_ENABLE;
-    gpio_config(&wake_in);
-
-    gpio_config_t po = {};
-    po.intr_type = GPIO_INTR_DISABLE;
-    po.mode = GPIO_MODE_OUTPUT;
-    po.pin_bit_mask = (1ULL << Power_Control);
-    po.pull_down_en = GPIO_PULLDOWN_ENABLE;
-    po.pull_up_en = GPIO_PULLUP_DISABLE;
-    gpio_config(&po);
-    gpio_set_level(Power_Control, 0);
+    baji_power_recovery_request_power_off();
+    (void)baji_power::EnablePowerKeyWakeup();
+    baji_power::CutPowerAndHoldLow();
 
     vTaskDelay(pdMS_TO_TICKS(200));
     while (POWER_KEY_PRESSED()) {
@@ -87,11 +63,6 @@ static void ChargingOnlyPowerOffDeepSleep(void)
     }
     vTaskDelay(pdMS_TO_TICKS(50));
 
-    esp_err_t err = esp_sleep_enable_ext1_wakeup((1ULL << Power_Dec), ESP_EXT1_WAKEUP_ANY_LOW);
-    if (err != ESP_OK) {
-        esp_sleep_enable_ext0_wakeup(Power_Dec, 0);
-    }
-    
     esp_deep_sleep_start();
 }
 

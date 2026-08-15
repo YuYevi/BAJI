@@ -1,25 +1,52 @@
 
 #include "config.h"
-#include <driver/gpio.h>
+#include "power_latch.h"
+#include "power_recovery_rtc.h"
+
 #include <esp_log.h>
 #include <esp_sleep.h>
+#include <esp_system.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+namespace {
+
+[[noreturn]] void PowerOffAfterRecoveryLoop()
+{
+    baji_power_recovery_request_power_off();
+    (void)baji_power::EnablePowerKeyWakeup();
+    baji_power::CutPowerAndHoldLow();
+
+    while (POWER_KEY_PRESSED()) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    vTaskDelay(pdMS_TO_TICKS(50));
+    esp_deep_sleep_start();
+}
+
+}  // namespace
+
 extern "C" void board_boot_power_on_gate(void)
 {
+    const BajiPowerRecoveryAction recovery_action =
+        baji_power_recovery_action(esp_reset_reason());
+    if (recovery_action == BajiPowerRecoveryAction::KeepPower) {
+        baji_power::KeepPowerOnAcrossReset();
+        return;
+    }
+    if (recovery_action == BajiPowerRecoveryAction::PowerOff) {
+        PowerOffAfterRecoveryLoop();
+    }
+
     const esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
     if (cause != ESP_SLEEP_WAKEUP_EXT0 && cause != ESP_SLEEP_WAKEUP_EXT1) {
+        if (baji_power_recovery_is_power_off_pending()) {
+            PowerOffAfterRecoveryLoop();
+        }
         return;
     }
 
-    gpio_config_t io = {};
-    io.intr_type = GPIO_INTR_DISABLE;
-    io.mode = GPIO_MODE_INPUT;
-    io.pin_bit_mask = (1ULL << Power_Dec);
-    io.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    io.pull_up_en = GPIO_PULLUP_ENABLE;
-    gpio_config(&io);
+    baji_power::ConfigurePowerKeyInput();
 
     const int poll_ms = 20;
     const int stable_need = (POWER_KEY_STABLE_RELEASE_MS + poll_ms - 1) / poll_ms;
@@ -36,8 +63,13 @@ extern "C" void board_boot_power_on_gate(void)
         }
         
 
-        while (POWER_KEY_RELEASED()) {
+        int rearm_wait_ms = 0;
+        while (POWER_KEY_RELEASED() && rearm_wait_ms < POWER_KEY_REARM_WAIT_MS) {
             vTaskDelay(pdMS_TO_TICKS(poll_ms));
+            rearm_wait_ms += poll_ms;
+        }
+        if (POWER_KEY_RELEASED()) {
+            PowerOffAfterRecoveryLoop();
         }
         
 
@@ -53,16 +85,9 @@ extern "C" void board_boot_power_on_gate(void)
         }
 
         if (!aborted) {
-            gpio_config_t po = {};
-            po.intr_type = GPIO_INTR_DISABLE;
-            po.mode = GPIO_MODE_OUTPUT;
-            po.pin_bit_mask = (1ULL << Power_Control);
-            po.pull_down_en = GPIO_PULLDOWN_ENABLE;
-            po.pull_up_en = GPIO_PULLUP_DISABLE;
-            gpio_config(&po);
-            gpio_set_level(Power_Control, 1);
+            baji_power::KeepPowerOnAcrossReset();
             vTaskDelay(pdMS_TO_TICKS(50));
-            
+            baji_power_recovery_allow_boot();
             return;
         }
 
@@ -72,7 +97,9 @@ extern "C" void board_boot_power_on_gate(void)
         }
         vTaskDelay(pdMS_TO_TICKS(100));
 
-        esp_sleep_enable_ext1_wakeup((1ULL << Power_Dec), ESP_EXT1_WAKEUP_ANY_LOW);
+        baji_power_recovery_request_power_off();
+        (void)baji_power::EnablePowerKeyWakeup();
+        baji_power::CutPowerAndHoldLow();
         esp_deep_sleep_start();
     }
 }

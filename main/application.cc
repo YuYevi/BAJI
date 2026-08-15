@@ -1148,6 +1148,7 @@ void Application::Initialize() {
 
     auto display = board.GetDisplay();
     display->SetupUI();
+    board.OnApplicationReady();
     if (auto* backlight = board.GetBacklight(); backlight != nullptr) {
         backlight->RestoreBrightness();
     }
@@ -1266,7 +1267,7 @@ void Application::Run() {
     vTaskPrioritySet(nullptr, 10);
 #if CONFIG_ESP_TASK_WDT_EN
     esp_err_t wdt_err = esp_task_wdt_add(nullptr);
-    if (wdt_err != ESP_OK && wdt_err != ESP_ERR_INVALID_STATE) {
+    if (wdt_err != ESP_OK) {
         ESP_LOGW(TAG, "Failed to add application task to watchdog: %s",
                  esp_err_to_name(wdt_err));
     }
@@ -1384,7 +1385,8 @@ void Application::Run() {
         if (bits & MAIN_EVENT_CLOCK_TICK) {
             // 处理秒级时钟 tick
             clock_ticks_++;
-            auto display = Board::GetInstance().GetDisplay();
+            auto& board = Board::GetInstance();
+            auto display = board.GetDisplay();
             display->UpdateStatusBar();
 
             // 监听模式下的静音检测
@@ -1405,6 +1407,8 @@ void Application::Run() {
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
             }
+
+            board.OnApplicationClockTick();
         }
     }
 }

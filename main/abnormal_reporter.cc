@@ -39,6 +39,16 @@ const char* ResetReasonToString(esp_reset_reason_t reason) {
             return "brownout";
         case ESP_RST_SDIO:
             return "sdio";
+        case ESP_RST_USB:
+            return "usb";
+        case ESP_RST_JTAG:
+            return "jtag";
+        case ESP_RST_EFUSE:
+            return "efuse";
+        case ESP_RST_PWR_GLITCH:
+            return "power_glitch";
+        case ESP_RST_CPU_LOCKUP:
+            return "cpu_lockup";
         default:
             return "other";
     }
@@ -55,6 +65,8 @@ bool ShouldReportReset(bool previous_shutdown_clean, esp_reset_reason_t reason) 
         case ESP_RST_TASK_WDT:
         case ESP_RST_WDT:
         case ESP_RST_BROWNOUT:
+        case ESP_RST_PWR_GLITCH:
+        case ESP_RST_CPU_LOCKUP:
             return true;
         default:
             return false;

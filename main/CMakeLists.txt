@@ -732,6 +732,15 @@ else()
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_TYPE}/*.c
     )
 endif()
+if(CONFIG_BOARD_TYPE_BAJI_ESP32_S3_TOUCH_LCD_1_85)
+    # Keep this explicit so an existing build directory notices the new source
+    # without relying on CONFIGURE_DEPENDS, which IDF's script-mode component
+    # requirements scan does not support.
+    list(APPEND BOARD_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/baji/BAJI/power_recovery_rtc.cc
+    )
+    list(REMOVE_DUPLICATES BOARD_SOURCES)
+endif()
 list(APPEND SOURCES ${BOARD_SOURCES})
 
 # Allow #include "config.h" from any main/ source (matches selected board)

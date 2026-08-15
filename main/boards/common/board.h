@@ -105,6 +105,8 @@ public:
     virtual bool IsWifiConfigModeActive() const { return false; }
     virtual bool GetAutoPowerSaveEnabled();
     virtual bool SetAutoPowerSaveEnabled(bool enabled);
+    virtual void OnApplicationReady() {}
+    virtual void OnApplicationClockTick() {}
 };
 
 #define DECLARE_BOARD(BOARD_CLASS_NAME) \

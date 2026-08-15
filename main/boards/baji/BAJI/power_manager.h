@@ -1,6 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <vector>
 #include <functional>
@@ -11,14 +12,12 @@
 #include <esp_adc/adc_cali.h>
 #include <esp_adc/adc_cali_scheme.h>
 #include "sdkconfig.h"
-#include "button.h"
-#include "board.h"
 #include "config.h"
 #include "settings.h"
 #include "charging_boot_rtc.h"
-#include "assets/lang_config.h"
+#include "power_latch.h"
+#include "power_recovery_rtc.h"
 #include "abnormal_reporter.h"
-#include "mqtt_control.h"
 #include <esp_log.h>
 #include <esp_sleep.h>
 #include <esp_system.h>
@@ -26,14 +25,14 @@
 #include <freertos/task.h>
 
 
-enum class PowerUiHint {
-    ShuttingDown,
-};
-
 class PowerManager {
 private:
     esp_timer_handle_t timer_handle_ = nullptr;
     esp_timer_handle_t power_timer_handle_ = nullptr;
+    TaskHandle_t power_key_failsafe_task_handle_ = nullptr;
+    inline static constexpr uint32_t kPowerKeyFailsafeStackSize = 3072;
+    inline static StaticTask_t power_key_failsafe_task_buffer_{};
+    inline static StackType_t power_key_failsafe_stack_[kPowerKeyFailsafeStackSize]{};
     std::function<void(bool)> on_charging_status_changed_;
     std::function<void(bool)> on_low_battery_status_changed_;
 
@@ -97,8 +96,8 @@ private:
 
     bool new_charging_status = false;
     bool pending_charging_status_ = false;
-    bool shutdown_requested_ = false;
-    bool shutdown_first_ = true;
+    std::atomic<bool> shutdown_requested_{false};
+    std::atomic<bool> shutdown_task_started_{false};
     bool power_key_raw_pressed_ = false;
     bool power_key_stable_pressed_ = false;
     bool power_key_long_press_handled_ = false;
@@ -118,7 +117,6 @@ private:
     static constexpr uint16_t kPowerKeyMultiClickGuardTicks =
         (POWER_KEY_MULTI_CLICK_GUARD_MS + POWER_KEY_SCAN_INTERVAL_MS - 1) / POWER_KEY_SCAN_INTERVAL_MS;
 
-    std::function<void(PowerUiHint)> on_power_ui_;
     std::function<void()> on_power_single_click_;
     std::function<void()> on_power_double_click_;
     std::function<void()> on_power_triple_click_;
@@ -144,13 +142,64 @@ private:
         }
     }
 
-    void TriggerShutdownFromPowerKey() {
-        if (timer_handle_) {
-            esp_timer_stop(timer_handle_);
-            esp_timer_delete(timer_handle_);
-            timer_handle_ = nullptr;
+    void CutPowerImmediately() {
+        shutdown_requested_.store(true);
+        baji_power_recovery_request_power_off();
+        (void)baji_power::EnablePowerKeyWakeup();
+        baji_power::CutPowerAndHoldLow();
+    }
+
+    void EnterPowerOff() {
+        // This GPIO action is intentionally repeatable. The running-system
+        // failsafe task is the sole deep-sleep finalizer; pre-task boot paths
+        // finish synchronously here.
+        CutPowerImmediately();
+
+        if (power_key_failsafe_task_handle_ != nullptr &&
+            xTaskGetCurrentTaskHandle() != power_key_failsafe_task_handle_) {
+            xTaskNotifyGive(power_key_failsafe_task_handle_);
+            return;
         }
-        shutdown_requested_ = true;
+
+        while (POWER_KEY_PRESSED()) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+        esp_deep_sleep_start();
+    }
+
+    static void PowerKeyFailsafeTask(void* arg) {
+        auto* self = static_cast<PowerManager*>(arg);
+        int64_t press_started_us = 0;
+        bool force_cut_triggered = false;
+
+        for (;;) {
+            if (ulTaskNotifyTake(pdTRUE, 0) > 0) {
+                self->EnterPowerOff();
+            }
+
+            if (POWER_KEY_PRESSED()) {
+                const int64_t now_us = esp_timer_get_time();
+                if (press_started_us == 0) {
+                    press_started_us = now_us;
+                } else if (!force_cut_triggered &&
+                           now_us - press_started_us >=
+                               static_cast<int64_t>(POWER_KEY_FORCE_CUT_HOLD_MS) * 1000) {
+                    force_cut_triggered = true;
+                    self->EnterPowerOff();
+                }
+            } else {
+                press_started_us = 0;
+                force_cut_triggered = false;
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(POWER_KEY_SCAN_INTERVAL_MS));
+        }
+    }
+
+    void TriggerShutdownFromPowerKey() {
+        shutdown_requested_.store(true);
+        baji_power_recovery_request_power_off();
         shutdown();
     }
 
@@ -201,7 +250,7 @@ private:
     }
 
     void HandlePowerKey() {
-        if (shutdown_requested_) {
+        if (shutdown_requested_.load()) {
             return;
         }
 
@@ -646,30 +695,16 @@ private:
     }
 
     void RunShutdownSequence() {
-        
-        if (on_power_ui_) {
-            on_power_ui_(PowerUiHint::ShuttingDown);
-        }
-        vTaskDelay(pdMS_TO_TICKS(500));
+        // Record the user's intent before any operation that can block. A WDT
+        // reset during persistence must finish powering off, not boot again.
+        baji_power_recovery_request_power_off();
 
         if (power_timer_handle_) {
-            esp_timer_stop(power_timer_handle_);
+            (void)esp_timer_stop(power_timer_handle_);
         }
         if (timer_handle_) {
-            esp_timer_stop(timer_handle_);
+            (void)esp_timer_stop(timer_handle_);
         }
-
-        if (auto* codec = Board::GetInstance().GetAudioCodec(); codec != nullptr) {
-            codec->SetOutputVolume(0, false);
-            vTaskDelay(pdMS_TO_TICKS(20));
-            codec->EnableOutput(false);
-            vTaskDelay(pdMS_TO_TICKS(80));
-        }
-
-        AbnormalReporter::MarkExpectedReset("poweroff");
-        // Try to publish the MQTT offline status before board power is cut.
-        MqttControl::GetInstance().Stop();
-        PersistBatteryState(true);
 
 #if POWER_CHARGE_DETECT_USE_GPIO
         if (gpio_get_level(charging_pin_) == POWER_USB_VBUS_ACTIVE_LEVEL) {
@@ -681,46 +716,14 @@ private:
         }
 #endif
 
-        gpio_set_level(DISPLAY_BACKLIGHT_PIN, 0);
-
-        
-        gpio_config_t wake_in = {};
-        wake_in.intr_type = GPIO_INTR_DISABLE;
-        wake_in.mode = GPIO_MODE_INPUT;
-        wake_in.pin_bit_mask = (1ULL << Power_Dec);
-        wake_in.pull_down_en = GPIO_PULLDOWN_DISABLE;
-        wake_in.pull_up_en = GPIO_PULLUP_ENABLE;
-        gpio_config(&wake_in);
-
-        gpio_set_level(Power_Control, 0);
-
-        vTaskDelay(pdMS_TO_TICKS(200));
-
-        
-        while (POWER_KEY_PRESSED()) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-        }
-        vTaskDelay(pdMS_TO_TICKS(50));
-
-        esp_err_t err = esp_sleep_enable_ext1_wakeup((1ULL << Power_Dec), ESP_EXT1_WAKEUP_ANY_LOW);
-        if (err != ESP_OK) {
-            
-            esp_sleep_enable_ext0_wakeup(Power_Dec, 0);
-        }
-        
-        esp_deep_sleep_start();
+        PersistBatteryState(true);
+        AbnormalReporter::MarkExpectedReset("poweroff");
+        EnterPowerOff();
     }
 
 public:
     PowerManager(gpio_num_t pin) : charging_pin_(pin) {
-        
-        gpio_config_t powerdecgpio_conf = {};
-        powerdecgpio_conf.intr_type = GPIO_INTR_DISABLE;
-        powerdecgpio_conf.mode = GPIO_MODE_INPUT;
-        powerdecgpio_conf.pin_bit_mask = (1ULL << Power_Dec);
-        powerdecgpio_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-        powerdecgpio_conf.pull_up_en = GPIO_PULLUP_ENABLE;
-        gpio_config(&powerdecgpio_conf);
+        baji_power::ConfigurePowerKeyInput();
         power_key_raw_pressed_ = POWER_KEY_PRESSED();
         power_key_stable_pressed_ = power_key_raw_pressed_;
         power_key_ignore_release_ = power_key_stable_pressed_;
@@ -743,37 +746,37 @@ public:
         const esp_reset_reason_t reset_reason = esp_reset_reason();
         const esp_sleep_wakeup_cause_t wc = esp_sleep_get_wakeup_cause();
 
-        
-        gpio_config_t powercontgpio_conf = {};
-        powercontgpio_conf.intr_type = GPIO_INTR_DISABLE;
-        powercontgpio_conf.mode = GPIO_MODE_OUTPUT;
-        powercontgpio_conf.pin_bit_mask = (1ULL << Power_Control); 
-        powercontgpio_conf.pull_down_en = GPIO_PULLDOWN_ENABLE; 
-        powercontgpio_conf.pull_up_en = GPIO_PULLUP_DISABLE;     
-        gpio_config(&powercontgpio_conf);
-        
-        if ((v5m_present && POWER_KEY_RELEASED()) || reset_reason == ESP_RST_SW ||
+        if ((v5m_present && POWER_KEY_RELEASED()) ||
+            baji_power_is_resume_reset(reset_reason) ||
             wc == ESP_SLEEP_WAKEUP_EXT0 || wc == ESP_SLEEP_WAKEUP_EXT1) {
-            gpio_set_level(Power_Control, 1);
-            
+            baji_power::KeepPowerOnAcrossReset();
         } else {
             const int poll_ms = 20;
             int elapsed = 0;
             
             while (elapsed < POWER_KEY_HOLD_MS_TO_BOOT) {
                 if (POWER_KEY_RELEASED()) {
-                    
-                    RunShutdownSequence();
+                    EnterPowerOff();
                     return;
                 }
                 vTaskDelay(pdMS_TO_TICKS(poll_ms));
                 elapsed += poll_ms;
             }
-            gpio_set_level(Power_Control, 1);
-            
+            baji_power::KeepPowerOnAcrossReset();
         }
-        
-        
+
+        power_key_failsafe_task_handle_ = xTaskCreateStatic(
+            PowerKeyFailsafeTask,
+            "power_key_failsafe",
+            kPowerKeyFailsafeStackSize,
+            this,
+            configMAX_PRIORITIES - 1,
+            power_key_failsafe_stack_,
+            &power_key_failsafe_task_buffer_);
+        if (power_key_failsafe_task_handle_ == nullptr) {
+            ESP_LOGE("PowerManager", "Failed to create power-key failsafe task");
+        }
+
         esp_timer_create_args_t power_timer_args = {
             .callback = [](void* arg) {
                 PowerManager* self = static_cast<PowerManager*>(arg);
@@ -828,6 +831,10 @@ public:
     }
 
     ~PowerManager() {
+        if (power_key_failsafe_task_handle_ != nullptr) {
+            vTaskDelete(power_key_failsafe_task_handle_);
+            power_key_failsafe_task_handle_ = nullptr;
+        }
         PersistBatteryState(true);
         DeinitAdcCalibration();
         if (timer_handle_) {
@@ -864,10 +871,6 @@ public:
         on_charging_status_changed_ = callback;
     }
 
-    void OnPowerUi(std::function<void(PowerUiHint)> callback) {
-        on_power_ui_ = std::move(callback);
-    }
-
     void OnPowerSingleClick(std::function<void()> callback) {
         on_power_single_click_ = std::move(callback);
     }
@@ -881,14 +884,24 @@ public:
     }
 
     void shutdown() {
-        if (!shutdown_first_) {
+        shutdown_requested_.store(true);
+        baji_power_recovery_request_power_off();
+
+        bool expected = false;
+        if (!shutdown_task_started_.compare_exchange_strong(expected, true)) {
             return;
         }
-        shutdown_first_ = false;
+
         BaseType_t ok = xTaskCreate(ShutdownTask, "pm_shutdown", 4096, this, tskIDLE_PRIORITY + 5, nullptr);
         if (ok != pdPASS) {
-            
-            RunShutdownSequence();
+            ESP_LOGE("PowerManager", "Failed to create shutdown task; using power-key failsafe");
+            if (power_key_failsafe_task_handle_ != nullptr) {
+                EnterPowerOff();
+            } else {
+                // This fallback can run in ESP_TIMER_TASK, so it must not wait
+                // or access NVS/I2C/LVGL.
+                CutPowerImmediately();
+            }
         }
     }
 };

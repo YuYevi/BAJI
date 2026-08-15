@@ -43,9 +43,13 @@
 #define POWER_KEY_DOUBLE_CLICK_WINDOW_MS        250  // 电源键双击窗口(ms)
 #define POWER_KEY_MULTI_CLICK_GUARD_MS           300  // 三击后需保持稳定释放的保护时间(ms)
 #define POWER_KEY_SHUTDOWN_HOLD_MS              2600 // 电源键长按关机时间(ms)
+#define POWER_KEY_FORCE_CUT_HOLD_MS             5000 // 独立任务强制释放电源锁存时间(ms)
 #define POWER_CHARGING_FULLSCREEN_BACKLIGHT     5    // 充电全屏背光
 #define POWER_KEY_HOLD_MS_TO_BOOT               3000 // 开机键按住时间(ms)
 #define POWER_KEY_STABLE_RELEASE_MS             80   // 开机键稳定释放时间(ms)
+#define POWER_KEY_REARM_WAIT_MS                 10000 // 深睡唤醒后等待新一轮长按的窗口(ms)
+#define POWER_RECOVERY_MAX_CONSECUTIVE_RESETS      3 // 连续异常复位超过此次数后关机
+#define POWER_RECOVERY_STABLE_UPTIME_MS         30000 // 运行稳定后清除连续复位计数(ms)
 
 #define POWER_CBS_ADC_UNIT              ADC_UNIT_1     // 电源ADC单元
 #define POWER_BATTERY_ADC_CHANNEL       ADC_CHANNEL_3  // 电池ADC通道
