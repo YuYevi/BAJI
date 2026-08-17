@@ -753,6 +753,7 @@ private:
 #endif
     uint32_t application_clock_ticks_ = 0;
     bool recovery_marked_stable_ = false;
+    std::atomic<bool> application_ready_{false};
     static CustomBoard* instance_;               ///< 单例实例
     std::atomic<bool> pending_4g_switch_{false}; ///< 待处理的4G切换请求
     std::atomic<int> pending_switch_target_{-1};
@@ -1968,6 +1969,37 @@ private:
                 power_save_timer_->SetEnabled(true);
             }
         });
+        power_manager_->OnShutdownRequested([this]() {
+            // Keep the failsafe path independent from the application task;
+            // this callback is only the best-effort UI/audio handoff.
+            if (!application_ready_.load()) {
+                return;
+            }
+            Application::GetInstance().Schedule([this]() {
+                if (display_ != nullptr) {
+                    display_->ShowNotification("正在关机...", 2000);
+                }
+
+                // Stop producers and invalidate queued PCM before muting the
+                // codec.  Otherwise AudioOutputTask can re-enable the PA and
+                // emit one final buffer during the GPIO1 power cut.
+                auto& app = Application::GetInstance();
+                app.GetAudioService().Stop();
+                (void)app.GetAudioService().WaitForStopped(200);
+
+                if (auto* codec = GetAudioCodec(); codec != nullptr) {
+                    codec->SetOutputVolume(0, false);
+                    vTaskDelay(pdMS_TO_TICKS(20));
+                    codec->EnableOutput(false);
+                }
+                // Leave the toast visible briefly, then turn off the
+                // backlight before the latch is released.
+                vTaskDelay(pdMS_TO_TICKS(450));
+                if (auto* backlight = GetBacklight(); backlight != nullptr) {
+                    backlight->SetBrightness(0);
+                }
+            });
+        });
         power_manager_->OnPowerSingleClick([this]() {
             Application::GetInstance().Schedule([this]() {
                 if (power_save_timer_) {
@@ -2189,6 +2221,7 @@ public:
     }
 
     void OnApplicationReady() override {
+        application_ready_.store(true);
 #if CONFIG_ESP_TASK_WDT_EN
         StartLvglWatchdog();
 #endif

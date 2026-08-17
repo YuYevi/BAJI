@@ -147,6 +147,9 @@ extern "C" void board_charging_only_main(void)
             hold_ms += poll_ms;
             if (hold_ms >= POWER_KEY_HOLD_MS_TO_BOOT) {
                 charging_rtc_clear_boot_flags();
+                // Clear the normal shutdown intent before restarting; the
+                // charging page can inherit it from the previous power-off.
+                baji_power_recovery_allow_boot();
                 AbnormalReporter::MarkExpectedReset("charging_boot");
                 esp_restart();
             }

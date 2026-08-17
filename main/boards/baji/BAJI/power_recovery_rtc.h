@@ -9,6 +9,7 @@ enum class BajiPowerRecoveryAction {
 };
 
 BajiPowerRecoveryAction baji_power_recovery_action(esp_reset_reason_t reason);
+bool baji_power_is_programmer_reset(esp_reset_reason_t reason);
 bool baji_power_is_resume_reset(esp_reset_reason_t reason);
 bool baji_power_recovery_is_power_off_pending();
 void baji_power_recovery_request_power_off();

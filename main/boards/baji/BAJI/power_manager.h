@@ -35,6 +35,7 @@ private:
     inline static StackType_t power_key_failsafe_stack_[kPowerKeyFailsafeStackSize]{};
     std::function<void(bool)> on_charging_status_changed_;
     std::function<void(bool)> on_low_battery_status_changed_;
+    std::function<void()> on_shutdown_requested_;
 
     gpio_num_t charging_pin_ = GPIO_NUM_NC;
     std::vector<uint16_t> battery_mv_samples_;
@@ -706,6 +707,15 @@ private:
             (void)esp_timer_stop(timer_handle_);
         }
 
+        // Best-effort user-facing/audio handoff. The independent 5-second
+        // failsafe never depends on this callback, LVGL, I2C, or audio.
+        if (on_shutdown_requested_) {
+            on_shutdown_requested_();
+            // Give the UI/audio handoff enough time to be observable while
+            // remaining far below the independent 5-second force-cut path.
+            vTaskDelay(pdMS_TO_TICKS(700));
+        }
+
 #if POWER_CHARGE_DETECT_USE_GPIO
         if (gpio_get_level(charging_pin_) == POWER_USB_VBUS_ACTIVE_LEVEL) {
             charging_rtc_set_usb_shutdown_flag();
@@ -869,6 +879,10 @@ public:
 
     void OnChargingStatusChanged(std::function<void(bool)> callback) {
         on_charging_status_changed_ = callback;
+    }
+
+    void OnShutdownRequested(std::function<void()> callback) {
+        on_shutdown_requested_ = std::move(callback);
     }
 
     void OnPowerSingleClick(std::function<void()> callback) {

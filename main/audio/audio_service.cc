@@ -792,6 +792,12 @@ void AudioService::SetCallbacks(AudioServiceCallbacks& callbacks) {
 }
 
 void AudioService::PlaySound(const std::string_view& ogg) {
+    // Do not allow a sound callback that was already queued in the
+    // application task to re-enable the power amplifier after shutdown starts.
+    if (service_stopped_.load()) {
+        return;
+    }
+
     if (!codec_->output_enabled()) {
         esp_timer_stop(audio_power_timer_);
         esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);

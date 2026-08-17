@@ -26,6 +26,17 @@ bool IsFaultReset(esp_reset_reason_t reason) {
     }
 }
 
+bool IsProgrammerReset(esp_reset_reason_t reason) {
+    switch (reason) {
+        case ESP_RST_USB:
+        case ESP_RST_JTAG:
+        case ESP_RST_EXT:
+            return true;
+        default:
+            return false;
+    }
+}
+
 void ClearRecoveryState() {
     // Treat magic as the commit marker so an interrupted clear is retried.
     s_recovery_magic = 0;
@@ -44,6 +55,13 @@ void EnsureRecoveryState() {
 
 BajiPowerRecoveryAction baji_power_recovery_action(esp_reset_reason_t reason) {
     EnsureRecoveryState();
+
+    // USB/JTAG flashing and external reset-control tools must be allowed to
+    // recover a board that was previously put into the power-off state.
+    if (IsProgrammerReset(reason)) {
+        ClearRecoveryState();
+        return BajiPowerRecoveryAction::KeepPower;
+    }
 
     if (s_power_off_pending != 0) {
         if (reason == ESP_RST_POWERON) {
@@ -77,8 +95,12 @@ BajiPowerRecoveryAction baji_power_recovery_action(esp_reset_reason_t reason) {
                : BajiPowerRecoveryAction::PowerOff;
 }
 
+bool baji_power_is_programmer_reset(esp_reset_reason_t reason) {
+    return IsProgrammerReset(reason);
+}
+
 bool baji_power_is_resume_reset(esp_reset_reason_t reason) {
-    return reason == ESP_RST_SW || IsFaultReset(reason);
+    return reason == ESP_RST_SW || IsFaultReset(reason) || IsProgrammerReset(reason);
 }
 
 bool baji_power_recovery_is_power_off_pending() {
