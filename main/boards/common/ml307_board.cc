@@ -50,6 +50,7 @@ std::string Ml307Board::GetBoardType() {
 }
 
 void Ml307Board::SetNetworkEventCallback(NetworkEventCallback callback) {
+    std::lock_guard<std::mutex> lock(network_event_callback_mutex_);
     network_event_callback_ = std::move(callback);
 }
 
@@ -84,8 +85,13 @@ void Ml307Board::OnNetworkEvent(NetworkEvent event, const std::string& data) {
     }
 
     
-    if (network_event_callback_) {
-        network_event_callback_(event, data);
+    NetworkEventCallback callback;
+    {
+        std::lock_guard<std::mutex> lock(network_event_callback_mutex_);
+        callback = network_event_callback_;
+    }
+    if (callback) {
+        callback(event, data);
     }
 }
 

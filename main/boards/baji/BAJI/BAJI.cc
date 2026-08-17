@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <string>
 #include <atomic>
+#include <mutex>
 #include <new>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
@@ -607,8 +608,10 @@ private:
     uint32_t application_clock_ticks_ = 0;
     bool recovery_marked_stable_ = false;
     static CustomBoard* instance_;               ///< 单例实例
-    bool pending_4g_switch_ = false;             ///< 待处理的4G切换请求
-    bool fourg_power_on_ = false;                ///< 4G模块电源状态
+    std::atomic<bool> pending_4g_switch_{false}; ///< 待处理的4G切换请求
+    std::atomic<int> pending_switch_target_{-1};
+    std::atomic<uint32_t> pending_switch_generation_{0};
+    std::atomic<bool> fourg_power_on_{false};    ///< 4G模块电源状态
     esp_timer_handle_t fourg_confirm_timer_ = nullptr; ///< 4G切换确认定时器
     bool auto_power_restore_pending_ = false;    ///< 是否记录了开启前的亮度/音量
     uint8_t auto_power_saved_brightness_ = 100;  ///< 开启前亮度
@@ -627,11 +630,18 @@ private:
         ConnectingWifi,
         Connecting4G,
         WifiProvisioning,
+        Failed,
     };
 
-    NetMode net_mode_ = NetMode::WIFI;           ///< 当前网络模式
+    std::atomic<NetMode> net_mode_{NetMode::WIFI}; ///< 当前网络后端
+    std::atomic<BoardNetworkMode> active_network_mode_{BoardNetworkMode::UNSUPPORTED};
+    std::atomic<BoardNetworkMode> target_network_mode_{BoardNetworkMode::UNSUPPORTED};
+    std::atomic<bool> network_link_up_{false};
+    std::atomic<uint32_t> network_generation_{0};
+    std::atomic<bool> save_preferred_on_connect_{false};
     std::unique_ptr<Ml307Board> ml307_board_;    ///< ML307模块管理对象
     NetworkEventCallback net_cb_;                ///< 网络事件回调
+    mutable std::mutex net_cb_mutex_;
     bool prefer_4g_on_boot_ = true;             ///< 开机偏好4G网络
     TaskHandle_t fourg_boot_task_ = nullptr;     ///< 4G启动任务句柄
     TaskHandle_t net_switch_task_ = nullptr;     ///< 网络切换任务句柄
@@ -647,6 +657,7 @@ private:
     static void FourgConfirmTimerCb(void* arg) {
         auto self = static_cast<CustomBoard*>(arg);
         self->pending_4g_switch_ = false;
+        self->pending_switch_target_.store(-1);
     }
 
 #if CONFIG_ESP_TASK_WDT_EN
@@ -699,9 +710,65 @@ private:
         net_flow_state_.store(state);
     }
 
+    static BoardNetworkMode ToBoardNetworkMode(NetMode mode) {
+        return mode == NetMode::ML307 ? BoardNetworkMode::CELLULAR : BoardNetworkMode::WIFI;
+    }
+
+    void SetBackendMode(NetMode mode) {
+        net_mode_.store(mode);
+        target_network_mode_.store(ToBoardNetworkMode(mode));
+    }
+
+    void BeginNetworkAttempt(NetMode target, NetFlowState state) {
+        SetBackendMode(target);
+        network_link_up_.store(false);
+        SetNetFlowState(state);
+    }
+
+    void MarkNetworkOffline() {
+        network_link_up_.store(false);
+        active_network_mode_.store(BoardNetworkMode::UNSUPPORTED);
+    }
+
+    void MarkNetworkConnected(NetMode source) {
+        SetBackendMode(source);
+        active_network_mode_.store(ToBoardNetworkMode(source));
+        target_network_mode_.store(ToBoardNetworkMode(source));
+        network_link_up_.store(true);
+        SetNetFlowState(NetFlowState::Idle);
+
+        if (save_preferred_on_connect_.exchange(false)) {
+            SavePreferredNetwork(source);
+        }
+    }
+
+    uint32_t BeginNetworkGeneration() {
+        return network_generation_.fetch_add(1) + 1;
+    }
+
+    BoardNetworkPhase GetPublicNetworkPhase() const {
+        switch (GetNetFlowState()) {
+            case NetFlowState::SwitchingToWifi:
+            case NetFlowState::SwitchingTo4G:
+                return BoardNetworkPhase::SWITCHING;
+            case NetFlowState::ConnectingWifi:
+            case NetFlowState::Connecting4G:
+                return BoardNetworkPhase::CONNECTING;
+            case NetFlowState::WifiProvisioning:
+                return BoardNetworkPhase::PROVISIONING;
+            case NetFlowState::Failed:
+                return BoardNetworkPhase::FAILED;
+            case NetFlowState::Idle:
+            default:
+                return network_link_up_.load() ? BoardNetworkPhase::ONLINE
+                                               : BoardNetworkPhase::OFFLINE;
+        }
+    }
+
     bool IsNetFlowProtected() const {
         return GetNetFlowState() != NetFlowState::Idle ||
-               fourg_recovery_task_ != nullptr;
+               net_switch_task_ != nullptr || fourg_boot_task_ != nullptr ||
+               wifi_reprovision_task_ != nullptr || fourg_recovery_task_ != nullptr;
     }
 
     bool IsFlowMovingAwayFrom(NetMode target) const {
@@ -872,16 +939,22 @@ private:
 
     void FallbackToWifiAfter4gStartFailure() {
         ESP_LOGW(TAG, "Falling back to Wi-Fi after 4G start failed");
+        if (ml307_board_) {
+            ml307_board_->SetNetworkEventCallback(NetworkEventCallback{});
+        }
         TurnOff4GModule();
 
         if (!HasSavedWifi()) {
-            SetNetFlowState(NetFlowState::Idle);
+            MarkNetworkOffline();
+            SetNetFlowState(NetFlowState::Failed);
             return;
         }
 
-        net_mode_ = NetMode::WIFI;
+        BeginNetworkGeneration();
+        BeginNetworkAttempt(NetMode::WIFI, NetFlowState::ConnectingWifi);
+        BindWifiNetworkCallback();
         SetWifiAutoReconnectEnabled(true);
-        SetNetFlowState(NetFlowState::ConnectingWifi);
+        save_preferred_on_connect_.store(false);
         if (Application::GetInstance().IsOtaUpgradeInProgress()) {
             Application::GetInstance().NotifyOtaNetworkSwitchRequested(BoardNetworkMode::WIFI);
         }
@@ -910,10 +983,48 @@ private:
                fourg_recovery_task_ == nullptr;
     }
 
+    void BindWifiNetworkCallback() {
+        const uint32_t generation = network_generation_.load();
+        WifiBoard::SetNetworkEventCallback(
+            [this, generation](NetworkEvent event, const std::string& data) {
+                HandleManagedNetworkEvent(event, data, NetMode::WIFI, generation);
+            });
+    }
+
+    void Bind4gNetworkCallback() {
+        if (!ml307_board_) {
+            return;
+        }
+        const uint32_t generation = network_generation_.load();
+        ml307_board_->SetNetworkEventCallback(
+            [this, generation](NetworkEvent event, const std::string& data) {
+                HandleManagedNetworkEvent(event, data, NetMode::ML307, generation);
+            });
+    }
+
+    void DispatchNetworkEvent(NetworkEvent event, const std::string& data) {
+        NetworkEventCallback callback;
+        {
+            std::lock_guard<std::mutex> lock(net_cb_mutex_);
+            callback = net_cb_;
+        }
+        if (callback) {
+            callback(event, data);
+        }
+    }
+
     void StartWifiRecoveryAfter4gFailure(NetworkEvent event) {
         if (!CanRecover4gToWifi(event)) {
             return;
         }
+
+        // Publish the handoff before creating the recovery task.  The modem
+        // can emit more late events while it is being stopped; moving the
+        // manager to a new generation immediately makes those events stale
+        // and keeps the UI from accepting a second switch request.
+        BeginNetworkGeneration();
+        BeginNetworkAttempt(NetMode::WIFI, NetFlowState::SwitchingToWifi);
+        save_preferred_on_connect_.store(false);
 
         struct RecoveryCtx {
             CustomBoard* self;
@@ -922,6 +1033,12 @@ private:
         auto* ctx = new (std::nothrow) RecoveryCtx{this};
         if (ctx == nullptr) {
             fourg_recovery_task_ = nullptr;
+            // The modem is still owned by the old generation.  Leave the
+            // manager in a retryable failed state instead of claiming that
+            // Wi-Fi recovery is in progress when no task exists to perform it.
+            SetBackendMode(NetMode::ML307);
+            MarkNetworkOffline();
+            SetNetFlowState(NetFlowState::Failed);
             ESP_LOGE(TAG, "Failed to allocate 4G recovery context");
             return;
         }
@@ -930,8 +1047,8 @@ private:
             auto self = ctx->self;
             delete ctx;
 
+            self->EnsureBAJIStoppedBeforeSwitch();
             (void)self->WaitFor4gBootTaskDone(15000);
-            self->SetNetFlowState(NetFlowState::SwitchingToWifi);
             if (self->display_ != nullptr) {
                 self->display_->ShowNotification("4G连接失败，切回WiFi", 2000);
             }
@@ -941,10 +1058,18 @@ private:
             }
 
             if (!self->Stop4gNow()) {
-                ESP_LOGW(TAG, "Fallback to Wi-Fi while 4G task is still stopping");
+                ESP_LOGE(TAG, "Refusing Wi-Fi start because 4G did not stop cleanly");
+                self->MarkNetworkOffline();
+                self->save_preferred_on_connect_.store(false);
+                self->SetNetFlowState(NetFlowState::Failed);
+                self->fourg_recovery_task_ = nullptr;
+                vTaskDelete(nullptr);
+                return;
             }
 
-            self->net_mode_ = NetMode::WIFI;
+            self->MarkNetworkOffline();
+            self->SetBackendMode(NetMode::WIFI);
+            self->BindWifiNetworkCallback();
             self->SetWifiAutoReconnectEnabled(true);
             self->SetNetFlowState(NetFlowState::ConnectingWifi);
             self->WifiBoard::StartNetwork();
@@ -956,30 +1081,42 @@ private:
         if (task_created != pdPASS) {
             delete ctx;
             fourg_recovery_task_ = nullptr;
+            SetBackendMode(NetMode::ML307);
+            MarkNetworkOffline();
+            SetNetFlowState(NetFlowState::Failed);
             ESP_LOGE(TAG, "Failed to create 4G recovery task");
         }
     }
 
-    void HandleManagedNetworkEvent(NetworkEvent event, const std::string& data) {
+    void HandleManagedNetworkEvent(NetworkEvent event, const std::string& data,
+                                   NetMode source, uint32_t generation) {
+        if (generation != network_generation_.load()) {
+            ESP_LOGD(TAG, "Ignoring stale network event %d (generation %u, current %u)",
+                     static_cast<int>(event), static_cast<unsigned>(generation),
+                     static_cast<unsigned>(network_generation_.load()));
+            return;
+        }
+        if (source != net_mode_) {
+            ESP_LOGD(TAG, "Ignoring network event %d from inactive backend", static_cast<int>(event));
+            return;
+        }
+
         NetFlowState state = GetNetFlowState();
         bool recover_to_wifi = false;
         switch (event) {
             case NetworkEvent::Connecting:
-                if (net_mode_ == NetMode::ML307 ||
+                if (source == NetMode::ML307 ||
                     state == NetFlowState::SwitchingTo4G ||
                     state == NetFlowState::Connecting4G) {
                     SetNetFlowState(NetFlowState::Connecting4G);
-                } else if (net_mode_ == NetMode::WIFI ||
+                } else if (source == NetMode::WIFI ||
                            state == NetFlowState::SwitchingToWifi ||
                            state == NetFlowState::ConnectingWifi) {
                     SetNetFlowState(NetFlowState::ConnectingWifi);
                 }
                 break;
             case NetworkEvent::Connected:
-                SetNetFlowState(NetFlowState::Idle);
-                if (net_mode_ == NetMode::ML307 && fourg_recovery_task_ == nullptr) {
-                    SavePreferredNetwork(NetMode::ML307);
-                }
+                MarkNetworkConnected(source);
                 break;
             case NetworkEvent::WifiConfigModeEnter:
                 SetNetFlowState(NetFlowState::WifiProvisioning);
@@ -997,28 +1134,30 @@ private:
             case NetworkEvent::ModemErrorRegDenied:
             case NetworkEvent::ModemErrorInitFailed:
             case NetworkEvent::ModemErrorTimeout:
-                SetNetFlowState(NetFlowState::Idle);
+                MarkNetworkOffline();
+                SetNetFlowState(NetFlowState::Failed);
                 recover_to_wifi = true;
                 break;
             case NetworkEvent::Scanning:
                 break;
             case NetworkEvent::Disconnected:
-                if (net_mode_ == NetMode::ML307) {
-                    SetNetFlowState(NetFlowState::Idle);
+                MarkNetworkOffline();
+                if (source == NetMode::ML307) {
+                    SetNetFlowState(NetFlowState::Failed);
                     recover_to_wifi = true;
+                } else {
+                    SetNetFlowState(NetFlowState::Idle);
                 }
                 break;
             default:
                 break;
         }
 
-        if (net_cb_) {
-            net_cb_(event, data);
-        }
-
         if (recover_to_wifi) {
             StartWifiRecoveryAfter4gFailure(event);
         }
+
+        DispatchNetworkEvent(event, data);
     }
 
     /**
@@ -1137,7 +1276,7 @@ private:
     /**
      * @brief 立即停止WiFi
      */
-    void StopWifiNow() {
+    bool StopWifiNow() {
         MqttControl::GetInstance().StopForNetworkSwitch();
         esp_timer_stop(connect_timer_);
         WifiBoard::StopWifiConfigMode(false);
@@ -1145,10 +1284,12 @@ private:
         wifi_manager.StopStation();
         if (!DeinitializeWifiManager()) {
             ESP_LOGW(TAG, "Failed to release Wi-Fi driver before starting 4G");
+            return false;
         } else {
             // Wi-Fi tasks deleted by the driver are reclaimed by the idle task.
             vTaskDelay(pdMS_TO_TICKS(50));
         }
+        return true;
     }
 
     /**
@@ -1248,9 +1389,11 @@ private:
             CustomBoard* self;
             bool for_dialog_wake;
             bool cold_boot_start;
+            uint32_t generation;
         };
 
-        auto* ctx = new (std::nothrow) Start4gCtx{this, for_dialog_wake, cold_boot_start};
+        auto* ctx = new (std::nothrow)
+            Start4gCtx{this, for_dialog_wake, cold_boot_start, network_generation_.load()};
         if (ctx == nullptr) {
             SetNetFlowState(NetFlowState::Idle);
             ESP_LOGE(TAG, "Failed to allocate 4G start context");
@@ -1262,6 +1405,7 @@ private:
             auto self = ctx->self;
             const bool for_dialog_wake = ctx->for_dialog_wake;
             const bool cold_boot_start = ctx->cold_boot_start;
+            const uint32_t generation = ctx->generation;
             delete ctx;
 
             self->TurnOn4GModule();
@@ -1271,6 +1415,16 @@ private:
                 const int base_delay_ms = for_dialog_wake ? 2200 : 2600;
                 const int extra_delay_ms = cold_boot_start ? 2500 : 0;
                 vTaskDelay(pdMS_TO_TICKS(base_delay_ms + extra_delay_ms));
+            }
+
+            // A newer request may have failed or superseded this start while
+            // the modem was powering up.  Do not create/bind a modem task for
+            // an obsolete generation.
+            if (generation != self->network_generation_.load()) {
+                self->TurnOff4GModule();
+                self->fourg_boot_task_ = nullptr;
+                vTaskDelete(nullptr);
+                return;
             }
 
             if (!self->ml307_board_) {
@@ -1284,9 +1438,14 @@ private:
                     return;
                 }
             }
-            self->ml307_board_->SetNetworkEventCallback([self](NetworkEvent event, const std::string& data) {
-                self->HandleManagedNetworkEvent(event, data);
-            });
+            if (generation != self->network_generation_.load()) {
+                self->TurnOff4GModule();
+                self->ml307_board_.reset();
+                self->fourg_boot_task_ = nullptr;
+                vTaskDelete(nullptr);
+                return;
+            }
+            self->Bind4gNetworkCallback();
 
             self->SetNetFlowState(NetFlowState::Connecting4G);
             self->ml307_board_->StartNetwork();
@@ -1321,7 +1480,8 @@ private:
      * @param for_dialog_wake 是否为对话唤醒切换
      */
     bool SwitchNetworkRuntime(NetMode target, bool for_dialog_wake = false) {
-        if (net_switch_task_ != nullptr) {
+        if (net_switch_task_ != nullptr || fourg_boot_task_ != nullptr ||
+            wifi_reprovision_task_ != nullptr || fourg_recovery_task_ != nullptr) {
             return false;
         }
 
@@ -1349,28 +1509,63 @@ private:
 
             if (target == NetMode::ML307) {
                 if (!self->WaitForWifiReprovisionTaskDone(8000)) {
-                    self->SetNetFlowState(NetFlowState::Idle);
+                    self->BeginNetworkGeneration();
+                    self->save_preferred_on_connect_.store(false);
+                    self->target_network_mode_.store(self->active_network_mode_.load());
+                    self->SetNetFlowState(NetFlowState::Failed);
                     self->net_switch_task_ = nullptr;
                     vTaskDelete(nullptr);
                     return;
                 }
                 self->SetWifiAutoReconnectEnabled(false);
-                self->StopWifiNow();
-                self->net_mode_ = NetMode::ML307;
+                self->WifiBoard::SetNetworkEventCallback(NetworkEventCallback{});
+                if (!self->StopWifiNow()) {
+                    ESP_LOGE(TAG, "Refusing 4G start because Wi-Fi did not stop cleanly");
+                    self->SetWifiAutoReconnectEnabled(true);
+                    self->BindWifiNetworkCallback();
+                    self->save_preferred_on_connect_.store(false);
+                    self->target_network_mode_.store(self->active_network_mode_.load());
+                    self->SetNetFlowState(NetFlowState::Failed);
+                    self->net_switch_task_ = nullptr;
+                    vTaskDelete(nullptr);
+                    return;
+                }
+                self->MarkNetworkOffline();
+                self->SetBackendMode(NetMode::ML307);
                 if (!self->Start4gAsync(for_dialog_wake, false)) {
                     self->FallbackToWifiAfter4gStartFailure();
                 }
             } else {
                 if (!self->WaitFor4gBootTaskDone(15000)) {
-                    self->SetNetFlowState(NetFlowState::Idle);
+                    self->BeginNetworkGeneration();
+                    if (self->ml307_board_) {
+                        self->ml307_board_->SetNetworkEventCallback(NetworkEventCallback{});
+                    }
+                    self->save_preferred_on_connect_.store(false);
+                    self->target_network_mode_.store(self->active_network_mode_.load());
+                    self->network_link_up_.store(false);
+                    self->SetNetFlowState(NetFlowState::Failed);
                     self->net_switch_task_ = nullptr;
                     vTaskDelete(nullptr);
                     return;
                 }
-                self->Stop4gNow();
-                self->net_mode_ = NetMode::WIFI;
-                self->SavePreferredNetwork(NetMode::WIFI);
+                if (self->ml307_board_) {
+                    self->ml307_board_->SetNetworkEventCallback(NetworkEventCallback{});
+                }
+                if (!self->Stop4gNow()) {
+                    ESP_LOGE(TAG, "Refusing Wi-Fi start because 4G did not stop cleanly");
+                    self->MarkNetworkOffline();
+                    self->save_preferred_on_connect_.store(false);
+                    self->SetNetFlowState(NetFlowState::Failed);
+                    self->net_switch_task_ = nullptr;
+                    vTaskDelete(nullptr);
+                    return;
+                }
+                self->MarkNetworkOffline();
+                self->SetBackendMode(NetMode::WIFI);
+                self->BindWifiNetworkCallback();
                 self->SetWifiAutoReconnectEnabled(true);
+                self->SetNetFlowState(NetFlowState::ConnectingWifi);
                 self->WifiBoard::StartNetwork();
             }
 
@@ -1394,14 +1589,54 @@ private:
      * @return bool true=已受理切换请求，false=当前不可切换
      */
     bool RequestNetworkSwitch(NetMode target, bool for_dialog_wake = false, bool show_notification = true) {
-        if (net_switch_task_ != nullptr || fourg_recovery_task_ != nullptr) {
+        const BoardNetworkMode requested_mode = ToBoardNetworkMode(target);
+        const BoardNetworkMode active_mode = active_network_mode_.load();
+        const BoardNetworkMode pending_mode = target_network_mode_.load();
+        const NetFlowState flow_state = GetNetFlowState();
+        const bool flow_in_flight = flow_state != NetFlowState::Idle &&
+                                    flow_state != NetFlowState::Failed;
+        const bool task_in_flight = net_switch_task_ != nullptr ||
+                                    fourg_boot_task_ != nullptr ||
+                                    wifi_reprovision_task_ != nullptr ||
+                                    fourg_recovery_task_ != nullptr;
+
+        if ((task_in_flight || flow_in_flight) && requested_mode == pending_mode) {
+            return true;
+        }
+        if (task_in_flight || flow_in_flight) {
             if (show_notification) {
-                ShowNetFlowBusyNotification("网络忙，请稍后再试");
+                ShowNetFlowBusyNotification("network busy");
             }
             return false;
         }
 
-        if (target == net_mode_ && !IsFlowMovingAwayFrom(target)) {
+        if (requested_mode == active_mode && network_link_up_.load()) {
+            // The public API is an idempotent request interface: asking for
+            // the already-online backend is a successful no-op, not an
+            // error.  This keeps UI and OTA callers from showing a false
+            // failure when a duplicate click races with a Connected event.
+            return true;
+        }
+
+        if (IsApplicationBusyForNetOp() && !Application::GetInstance().IsOtaUpgradeInProgress()) {
+            if (show_notification) {
+                ShowApplicationBusyNotification();
+            }
+            return false;
+        }
+
+        BeginNetworkGeneration();
+        target_network_mode_.store(requested_mode);
+        network_link_up_.store(false);
+        save_preferred_on_connect_.store(true);
+
+        if (net_switch_task_ != nullptr || fourg_recovery_task_ != nullptr) {
+            save_preferred_on_connect_.store(false);
+            target_network_mode_.store(active_mode);
+            SetNetFlowState(NetFlowState::Failed);
+            if (show_notification) {
+                ShowNetFlowBusyNotification("网络忙，请稍后再试");
+            }
             return false;
         }
 
@@ -1409,7 +1644,9 @@ private:
             ? NetFlowState::SwitchingTo4G
             : NetFlowState::SwitchingToWifi);
         if (!SwitchNetworkRuntime(target, for_dialog_wake)) {
-            SetNetFlowState(NetFlowState::Idle);
+            save_preferred_on_connect_.store(false);
+            target_network_mode_.store(active_mode);
+            SetNetFlowState(NetFlowState::Failed);
             return false;
         }
 
@@ -1471,44 +1708,92 @@ private:
             return;
         }
 
-        if (net_switch_task_ != nullptr || wifi_reprovision_task_ != nullptr || fourg_recovery_task_ != nullptr) {
+        if (IsNetFlowProtected() || fourg_boot_task_ != nullptr) {
             ShowNetFlowBusyNotification("当前暂不允许进入配网");
             return;
         }
 
+        BeginNetworkGeneration();
+        target_network_mode_.store(BoardNetworkMode::WIFI);
+        network_link_up_.store(false);
+        save_preferred_on_connect_.store(false);
         SetNetFlowState(NetFlowState::WifiProvisioning);
 
         struct ReprovisionCtx {
             CustomBoard* self;
+            uint32_t generation;
         };
 
-        auto* ctx = new (std::nothrow) ReprovisionCtx{this};
+        auto* ctx = new (std::nothrow) ReprovisionCtx{this, network_generation_.load()};
         if (ctx == nullptr) {
-            SetNetFlowState(NetFlowState::Idle);
+            MarkNetworkOffline();
+            SetNetFlowState(NetFlowState::Failed);
             ESP_LOGE(TAG, "Failed to allocate Wi-Fi reprovision context");
             return;
         }
         if (xTaskCreate([](void* arg) {
             auto* ctx = static_cast<ReprovisionCtx*>(arg);
             auto self = ctx->self;
+            const uint32_t generation = ctx->generation;
             delete ctx;
 
             self->EnsureBAJIStoppedBeforeSwitch();
             (void)self->WaitForIdleBeforeSwitch(1500);
 
+            if (generation != self->network_generation_.load()) {
+                self->wifi_reprovision_task_ = nullptr;
+                vTaskDelete(nullptr);
+                return;
+            }
+
             if (self->net_mode_ == NetMode::ML307) {
                 if (!self->WaitFor4gBootTaskDone(15000)) {
-                    self->SetNetFlowState(NetFlowState::Idle);
+                    self->BeginNetworkGeneration();
+                    self->save_preferred_on_connect_.store(false);
+                    self->target_network_mode_.store(self->active_network_mode_.load());
+                    self->MarkNetworkOffline();
+                    self->SetNetFlowState(NetFlowState::Failed);
                     self->wifi_reprovision_task_ = nullptr;
                     vTaskDelete(nullptr);
                     return;
                 }
-                self->Stop4gNow();
+                if (generation != self->network_generation_.load()) {
+                    self->wifi_reprovision_task_ = nullptr;
+                    vTaskDelete(nullptr);
+                    return;
+                }
+                if (self->ml307_board_) {
+                    self->ml307_board_->SetNetworkEventCallback(NetworkEventCallback{});
+                }
+                if (!self->Stop4gNow()) {
+                    self->MarkNetworkOffline();
+                    self->save_preferred_on_connect_.store(false);
+                    self->SetNetFlowState(NetFlowState::Failed);
+                    self->wifi_reprovision_task_ = nullptr;
+                    vTaskDelete(nullptr);
+                    return;
+                }
             } else {
-                self->StopWifiNow();
+                if (generation != self->network_generation_.load()) {
+                    self->wifi_reprovision_task_ = nullptr;
+                    vTaskDelete(nullptr);
+                    return;
+                }
+                if (!self->StopWifiNow()) {
+                    self->SetWifiAutoReconnectEnabled(true);
+                    self->BindWifiNetworkCallback();
+                    self->MarkNetworkOffline();
+                    self->save_preferred_on_connect_.store(false);
+                    self->SetNetFlowState(NetFlowState::Failed);
+                    self->wifi_reprovision_task_ = nullptr;
+                    vTaskDelete(nullptr);
+                    return;
+                }
             }
 
-            self->net_mode_ = NetMode::WIFI;
+            self->MarkNetworkOffline();
+            self->SetBackendMode(NetMode::WIFI);
+            self->BindWifiNetworkCallback();
             self->SavePreferredNetwork(NetMode::WIFI);
             self->SetWifiAutoReconnectEnabled(true);
             self->EnterWifiConfigMode();
@@ -1518,7 +1803,8 @@ private:
         }, "baji185_wifi_reprov", 6144, ctx, 5, &wifi_reprovision_task_) != pdPASS) {
             delete ctx;
             wifi_reprovision_task_ = nullptr;
-            SetNetFlowState(NetFlowState::Idle);
+            MarkNetworkOffline();
+            SetNetFlowState(NetFlowState::Failed);
         }
     }
 
@@ -1638,8 +1924,17 @@ private:
                     esp_timer_stop(self->fourg_confirm_timer_);
                 }
 
-                bool to_4g = (self->net_mode_ == NetMode::WIFI);
-                self->RequestNetworkSwitch(to_4g ? NetMode::ML307 : NetMode::WIFI, false, true);
+                const int pending_target = self->pending_switch_target_.exchange(-1);
+                const uint32_t pending_generation = self->pending_switch_generation_.load();
+                if (pending_target < 0 || pending_generation != self->network_generation_.load()) {
+                    self->GetDisplay()->ShowNotification("network request expired", 2000);
+                    return;
+                }
+                const NetMode target = pending_target == static_cast<int>(BoardNetworkMode::CELLULAR)
+                    ? NetMode::ML307 : NetMode::WIFI;
+                if (!self->RequestNetworkSwitch(target, false, true)) {
+                    self->GetDisplay()->ShowNotification("network busy", 2000);
+                }
                 return;
             }
 
@@ -1656,7 +1951,25 @@ private:
 
         iot_button_register_cb(vol_up_handle_, BUTTON_LONG_PRESS_START, nullptr, [](void* button_handle, void* usr_data) {
             auto self = static_cast<CustomBoard*>(usr_data);
+            const BoardNetworkStatus status = self->GetNetworkStatus();
+            if (status.phase == BoardNetworkPhase::CONNECTING ||
+                status.phase == BoardNetworkPhase::SWITCHING ||
+                status.phase == BoardNetworkPhase::PROVISIONING) {
+                self->GetDisplay()->ShowNotification("network busy", 2000);
+                return;
+            }
+
+            BoardNetworkMode base_mode = status.active_mode != BoardNetworkMode::UNSUPPORTED
+                ? status.active_mode : status.target_mode;
+            if (base_mode == BoardNetworkMode::UNSUPPORTED) {
+                self->GetDisplay()->ShowNotification("network unavailable", 2000);
+                return;
+            }
+            const BoardNetworkMode target_mode = base_mode == BoardNetworkMode::WIFI
+                ? BoardNetworkMode::CELLULAR : BoardNetworkMode::WIFI;
             self->pending_4g_switch_ = true;
+            self->pending_switch_target_.store(static_cast<int>(target_mode));
+            self->pending_switch_generation_.store(status.generation);
 
             if (self->fourg_confirm_timer_ == nullptr) {
                 const esp_timer_create_args_t targs = {
@@ -1673,7 +1986,7 @@ private:
             ESP_ERROR_CHECK(esp_timer_start_once(self->fourg_confirm_timer_, 5 * 1000000ULL));
 
             self->GetDisplay()->ShowNotification(
-                self->net_mode_ == NetMode::WIFI ? "切换4G？短按音量+确认" : "切换WiFi？短按音量+确认", 2000);
+                target_mode == BoardNetworkMode::CELLULAR ? "切换4G？短按音量+确认" : "切换WiFi？短按音量+确认", 2000);
         }, this);
 
         iot_button_register_cb(vol_down_handle_, BUTTON_SINGLE_CLICK, nullptr, [](void* button_handle, void* usr_data) {
@@ -1868,20 +2181,25 @@ public:
      * @brief 启动网络
      */
     void StartNetwork() override {
+        BeginNetworkGeneration();
+        MarkNetworkOffline();
         if (!prefer_4g_on_boot_) {
             if (Is4GModemAliveQuickCheck()) {
                 TurnOff4GModule(true);
             }
 
-            net_mode_ = NetMode::WIFI;
-            SetNetFlowState(NetFlowState::ConnectingWifi);
+            BeginNetworkAttempt(NetMode::WIFI, NetFlowState::ConnectingWifi);
+            MarkNetworkOffline();
+            BindWifiNetworkCallback();
+            save_preferred_on_connect_.store(false);
             SetWifiAutoReconnectEnabled(true);
             WifiBoard::StartNetwork();
             return;
         }
 
-        net_mode_ = NetMode::ML307;
-        SetNetFlowState(NetFlowState::Connecting4G);
+        BeginNetworkAttempt(NetMode::ML307, NetFlowState::Connecting4G);
+        MarkNetworkOffline();
+        save_preferred_on_connect_.store(false);
         GetDisplay()->SetStatus("连接4G");
         if (!Start4gAsync(false, true)) {
             FallbackToWifiAfter4gStartFailure();
@@ -1894,16 +2212,12 @@ public:
      * @param callback 回调函数
      */
     void SetNetworkEventCallback(NetworkEventCallback callback) override {
-        net_cb_ = std::move(callback);
-        WifiBoard::SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
-            HandleManagedNetworkEvent(event, data);
-        });
-
-        if (ml307_board_) {
-            ml307_board_->SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
-                HandleManagedNetworkEvent(event, data);
-            });
+        {
+            std::lock_guard<std::mutex> lock(net_cb_mutex_);
+            net_cb_ = std::move(callback);
         }
+        BindWifiNetworkCallback();
+        Bind4gNetworkCallback();
     }
 
     /**
@@ -1912,7 +2226,21 @@ public:
      * @return NetworkInterface* 网络接口指针
      */
     NetworkInterface* GetNetwork() override {
-        return net_mode_ == NetMode::ML307 && ml307_board_ ? ml307_board_->GetNetwork() : WifiBoard::GetNetwork();
+        if (GetNetFlowState() != NetFlowState::Idle ||
+            net_switch_task_ != nullptr || fourg_boot_task_ != nullptr ||
+            wifi_reprovision_task_ != nullptr || fourg_recovery_task_ != nullptr ||
+            !network_link_up_.load()) {
+            return nullptr;
+        }
+
+        const BoardNetworkMode active = active_network_mode_.load();
+        if (active == BoardNetworkMode::CELLULAR) {
+            return ml307_board_ ? ml307_board_->GetNetwork() : nullptr;
+        }
+        if (active == BoardNetworkMode::WIFI) {
+            return WifiBoard::GetNetwork();
+        }
+        return nullptr;
     }
 
     /**
@@ -1921,14 +2249,33 @@ public:
      * @return const char* 图标字符串
      */
     const char* GetNetworkStateIcon() override {
-        if (net_mode_ == NetMode::ML307) {
+        if (GetNetFlowState() != NetFlowState::Idle || !network_link_up_.load()) {
+            return active_network_mode_.load() == BoardNetworkMode::CELLULAR
+                ? FONT_AWESOME_SIGNAL_OFF
+                : FONT_AWESOME_WIFI_SLASH;
+        }
+
+        if (active_network_mode_.load() == BoardNetworkMode::CELLULAR) {
             return ml307_board_ ? ml307_board_->GetNetworkStateIcon() : FONT_AWESOME_SIGNAL_OFF;
         }
-        return WifiBoard::GetNetworkStateIcon();
+        if (active_network_mode_.load() == BoardNetworkMode::WIFI) {
+            return WifiBoard::GetNetworkStateIcon();
+        }
+        return FONT_AWESOME_WIFI_SLASH;
     }
 
     BoardNetworkMode GetActiveNetworkMode() override {
-        return GetDisplayedNetworkMode();
+        return active_network_mode_.load();
+    }
+
+    BoardNetworkStatus GetNetworkStatus() override {
+        BoardNetworkStatus status;
+        status.active_mode = active_network_mode_.load();
+        status.target_mode = target_network_mode_.load();
+        status.phase = GetPublicNetworkPhase();
+        status.link_up = network_link_up_.load();
+        status.generation = network_generation_.load();
+        return status;
     }
 
     bool SwitchActiveNetworkMode(BoardNetworkMode mode) override {
@@ -1937,10 +2284,6 @@ public:
         }
 
         NetMode target = (mode == BoardNetworkMode::CELLULAR) ? NetMode::ML307 : NetMode::WIFI;
-        if (target == net_mode_) {
-            return true;
-        }
-
         return RequestNetworkSwitch(target, false, true);
     }
 };

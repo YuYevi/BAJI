@@ -78,6 +78,11 @@ typedef struct {
     home_cc_restart_confirm_t restart_confirm;
 
     uint8_t network_mode;
+    uint8_t network_target;
+    bool network_mode_valid;
+    bool network_switching;
+    bool network_switch_pending;
+    lv_timer_t * network_status_timer;
     bool auto_power_enabled;
     bool panel_open;
     bool panel_dragging;
@@ -306,11 +311,25 @@ static void home_cc_set_slider_value(home_cc_slider_t * slider,
 }
 
 /* 根据当前网络模式刷新两个切换按钮的视觉状态。 */
+static bool home_cc_network_phase_is_busy(uint8_t phase)
+{
+    return phase == APP_DEVICE_NETWORK_PHASE_CONNECTING ||
+           phase == APP_DEVICE_NETWORK_PHASE_SWITCHING ||
+           phase == APP_DEVICE_NETWORK_PHASE_PROVISIONING;
+}
+
 static void home_cc_update_network_style(void)
 {
     home_cc_network_option_t * wifi = &g_home_cc.network[HOME_CC_NETWORK_WIFI];
     home_cc_network_option_t * four_g = &g_home_cc.network[HOME_CC_NETWORK_4G];
-    bool wifi_active = (g_home_cc.network_mode == HOME_CC_NETWORK_WIFI);
+    bool wifi_active = g_home_cc.network_mode_valid &&
+                       (g_home_cc.network_mode == HOME_CC_NETWORK_WIFI);
+    bool four_g_active = g_home_cc.network_mode_valid &&
+                         (g_home_cc.network_mode == HOME_CC_NETWORK_4G);
+    bool wifi_target_pending = g_home_cc.network_switching &&
+                               (g_home_cc.network_target == APP_DEVICE_NETWORK_WIFI);
+    bool four_g_target_pending = g_home_cc.network_switching &&
+                                 (g_home_cc.network_target == APP_DEVICE_NETWORK_4G);
     lv_opa_t inactive_text_opa = home_cc_pct_opa(35);
     lv_opa_t inactive_icon_opa = home_cc_pct_opa(45);
 
@@ -318,27 +337,43 @@ static void home_cc_update_network_style(void)
 
     lv_obj_set_style_bg_color(wifi->btn, home_cc_color_purple(), 0);
     lv_obj_set_style_bg_opa(wifi->btn, wifi_active ? LV_OPA_COVER : home_cc_pct_opa(7), 0);
-    lv_obj_set_style_border_color(wifi->btn, wifi_active ? home_cc_color_purple_border() : home_cc_color_white(), 0);
-    lv_obj_set_style_border_opa(wifi->btn, wifi_active ? LV_OPA_COVER : home_cc_pct_opa(10), 0);
+    lv_obj_set_style_border_color(wifi->btn,
+                                  wifi_target_pending ? home_cc_color_yellow() :
+                                  (wifi_active ? home_cc_color_purple_border() : home_cc_color_white()), 0);
+    lv_obj_set_style_border_opa(wifi->btn,
+                                (wifi_active || wifi_target_pending) ? LV_OPA_COVER : home_cc_pct_opa(10), 0);
+    lv_obj_set_style_border_width(wifi->btn, wifi_target_pending ? 2 : 1, 0);
     lv_obj_set_style_shadow_width(wifi->btn, wifi_active ? 16 : 0, 0);
     lv_obj_set_style_shadow_color(wifi->btn, home_cc_color_purple(), 0);
     lv_obj_set_style_shadow_opa(wifi->btn, home_cc_pct_opa(50), 0);
     lv_obj_set_style_text_color(wifi->icon, home_cc_color_white(), 0);
     lv_obj_set_style_text_color(wifi->text, home_cc_color_white(), 0);
-    home_cc_set_text_opa(wifi->icon, wifi_active ? LV_OPA_COVER : inactive_icon_opa);
-    home_cc_set_text_opa(wifi->text, wifi_active ? LV_OPA_COVER : inactive_text_opa);
+    home_cc_set_text_opa(wifi->icon, (wifi_active || wifi_target_pending) ? LV_OPA_COVER : inactive_icon_opa);
+    home_cc_set_text_opa(wifi->text, (wifi_active || wifi_target_pending) ? LV_OPA_COVER : inactive_text_opa);
 
     lv_obj_set_style_bg_color(four_g->btn, home_cc_color_purple(), 0);
-    lv_obj_set_style_bg_opa(four_g->btn, wifi_active ? home_cc_pct_opa(7) : LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(four_g->btn, wifi_active ? home_cc_color_white() : home_cc_color_purple_border(), 0);
-    lv_obj_set_style_border_opa(four_g->btn, wifi_active ? home_cc_pct_opa(10) : LV_OPA_COVER, 0);
-    lv_obj_set_style_shadow_width(four_g->btn, wifi_active ? 0 : 16, 0);
+    lv_obj_set_style_bg_opa(four_g->btn, four_g_active ? LV_OPA_COVER : home_cc_pct_opa(7), 0);
+    lv_obj_set_style_border_color(four_g->btn,
+                                  four_g_target_pending ? home_cc_color_yellow() :
+                                  (four_g_active ? home_cc_color_purple_border() : home_cc_color_white()), 0);
+    lv_obj_set_style_border_opa(four_g->btn,
+                                (four_g_active || four_g_target_pending) ? LV_OPA_COVER : home_cc_pct_opa(10), 0);
+    lv_obj_set_style_border_width(four_g->btn, four_g_target_pending ? 2 : 1, 0);
+    lv_obj_set_style_shadow_width(four_g->btn, four_g_active ? 16 : 0, 0);
     lv_obj_set_style_shadow_color(four_g->btn, home_cc_color_purple(), 0);
     lv_obj_set_style_shadow_opa(four_g->btn, home_cc_pct_opa(50), 0);
     lv_obj_set_style_text_color(four_g->icon, home_cc_color_white(), 0);
     lv_obj_set_style_text_color(four_g->text, home_cc_color_white(), 0);
-    home_cc_set_text_opa(four_g->icon, wifi_active ? inactive_icon_opa : LV_OPA_COVER);
-    home_cc_set_text_opa(four_g->text, wifi_active ? inactive_text_opa : LV_OPA_COVER);
+    home_cc_set_text_opa(four_g->icon, (four_g_active || four_g_target_pending) ? LV_OPA_COVER : inactive_icon_opa);
+    home_cc_set_text_opa(four_g->text, (four_g_active || four_g_target_pending) ? LV_OPA_COVER : inactive_text_opa);
+
+    if(g_home_cc.network_switching) {
+        lv_obj_add_state(wifi->btn, LV_STATE_DISABLED);
+        lv_obj_add_state(four_g->btn, LV_STATE_DISABLED);
+    } else {
+        lv_obj_clear_state(wifi->btn, LV_STATE_DISABLED);
+        lv_obj_clear_state(four_g->btn, LV_STATE_DISABLED);
+    }
 }
 
 /* 根据当前状态刷新自动省电按钮与开关视觉。 */
@@ -379,14 +414,59 @@ static void home_cc_update_auto_power_style(void)
 }
 
 /* 从设备读取当前设置，并同步刷新控制中心显示。 */
+static void home_cc_sync_network_from_device(void)
+{
+    app_device_network_status_t status;
+    if(!app_device_get_network_status(&status)) {
+        g_home_cc.network_mode_valid = false;
+        g_home_cc.network_switching = false;
+        g_home_cc.network_switch_pending = false;
+        g_home_cc.network_target = APP_DEVICE_NETWORK_UNSUPPORTED;
+        home_cc_update_network_style();
+        return;
+    }
+
+    g_home_cc.network_target = status.target_mode;
+    g_home_cc.network_switching = home_cc_network_phase_is_busy(status.phase);
+    if(status.active_mode == APP_DEVICE_NETWORK_WIFI ||
+       status.active_mode == APP_DEVICE_NETWORK_4G) {
+        g_home_cc.network_mode = status.active_mode;
+        g_home_cc.network_mode_valid = status.link_up;
+    } else {
+        g_home_cc.network_mode_valid = false;
+    }
+
+    if(status.phase == APP_DEVICE_NETWORK_PHASE_FAILED ||
+       status.phase == APP_DEVICE_NETWORK_PHASE_OFFLINE) {
+        g_home_cc.network_switch_pending = false;
+        g_home_cc.network_switching = false;
+    }
+    if(g_home_cc.network_switch_pending &&
+       status.phase == APP_DEVICE_NETWORK_PHASE_ONLINE &&
+       status.active_mode == g_home_cc.network_target) {
+        g_home_cc.network_switch_pending = false;
+        g_home_cc.network_switching = false;
+    }
+    home_cc_update_network_style();
+}
+
 static void home_cc_sync_from_device(void)
 {
-    g_home_cc.network_mode = app_device_get_network_mode_is_4g() ? HOME_CC_NETWORK_4G : HOME_CC_NETWORK_WIFI;
+    home_cc_sync_network_from_device();
     g_home_cc.auto_power_enabled = app_device_get_auto_power_save_enabled();
     home_cc_set_slider_value(&g_home_cc.brightness, app_device_get_brightness(), false, false);
     home_cc_set_slider_value(&g_home_cc.volume, app_device_get_volume(), false, false);
     home_cc_update_network_style();
     home_cc_update_auto_power_style();
+}
+
+static void home_cc_network_status_timer_cb(lv_timer_t * timer)
+{
+    (void)timer;
+    if(!g_home_cc.panel) return;
+    if(ui_ControlCenter_is_visible() || g_home_cc.network_switch_pending) {
+        home_cc_sync_network_from_device();
+    }
 }
 
 /* 限制面板 Y 坐标，避免拖出可视范围。 */
@@ -578,15 +658,20 @@ static void home_cc_network_event_cb(lv_event_t * e)
 {
     if(lv_event_get_code(e) != LV_EVENT_CLICKED) return;
 
+    home_cc_sync_network_from_device();
+    if(g_home_cc.network_switching) return;
+
     uint8_t target_mode = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
-    if(target_mode == g_home_cc.network_mode) return;
+    if(g_home_cc.network_mode_valid && target_mode == g_home_cc.network_mode) return;
 
     if(!app_device_switch_network_mode(target_mode == HOME_CC_NETWORK_4G)) {
         home_cc_sync_from_device();
         return;
     }
 
-    g_home_cc.network_mode = target_mode;
+    g_home_cc.network_target = target_mode;
+    g_home_cc.network_switch_pending = true;
+    g_home_cc.network_switching = true;
     home_cc_update_network_style();
 }
 
@@ -1104,6 +1189,7 @@ void ui_ControlCenter_init(lv_obj_t * screen)
     home_cc_build_close_zone();
     home_cc_build_pull_zone();
 
+    g_home_cc.network_status_timer = lv_timer_create(home_cc_network_status_timer_cb, 300, NULL);
     home_cc_sync_from_device();
     home_cc_show_panel(false);
     home_cc_clear_event_bubble_subtree(g_home_cc.scrim);
@@ -1113,6 +1199,10 @@ void ui_ControlCenter_init(lv_obj_t * screen)
 void ui_ControlCenter_deinit(void)
 {
     home_cc_stop_panel_anim();
+    if(g_home_cc.network_status_timer) {
+        lv_timer_delete(g_home_cc.network_status_timer);
+        g_home_cc.network_status_timer = NULL;
+    }
     home_cc_reset_context();
 }
 

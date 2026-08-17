@@ -38,6 +38,31 @@ uint8_t app_device_get_volume(void);
 void app_device_set_volume(uint8_t volume, bool permanent);
 bool app_device_get_network_mode_is_4g(void);
 bool app_device_switch_network_mode(bool use_4g);
+
+enum {
+    APP_DEVICE_NETWORK_WIFI = 0,
+    APP_DEVICE_NETWORK_4G = 1,
+    APP_DEVICE_NETWORK_UNSUPPORTED = 255,
+};
+
+enum {
+    APP_DEVICE_NETWORK_PHASE_OFFLINE = 0,
+    APP_DEVICE_NETWORK_PHASE_CONNECTING = 1,
+    APP_DEVICE_NETWORK_PHASE_ONLINE = 2,
+    APP_DEVICE_NETWORK_PHASE_SWITCHING = 3,
+    APP_DEVICE_NETWORK_PHASE_PROVISIONING = 4,
+    APP_DEVICE_NETWORK_PHASE_FAILED = 5,
+};
+
+typedef struct {
+    uint8_t active_mode;
+    uint8_t target_mode;
+    uint8_t phase;
+    bool link_up;
+    uint32_t generation;
+} app_device_network_status_t;
+
+bool app_device_get_network_status(app_device_network_status_t *status);
 bool app_device_get_auto_power_save_enabled(void);
 bool app_device_set_auto_power_save_enabled(bool enabled);
 int32_t app_device_get_alarm_count(void);

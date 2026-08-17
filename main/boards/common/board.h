@@ -44,6 +44,26 @@ enum class BoardNetworkMode {
     UNSUPPORTED,
 };
 
+// A point-in-time view of the network manager.  The active mode is the
+// backend that has actually reported Connected; target_mode is only the
+// requested destination and must not be used as an online signal.
+enum class BoardNetworkPhase : uint8_t {
+    OFFLINE = 0,
+    CONNECTING,
+    ONLINE,
+    SWITCHING,
+    PROVISIONING,
+    FAILED,
+};
+
+struct BoardNetworkStatus {
+    BoardNetworkMode active_mode = BoardNetworkMode::UNSUPPORTED;
+    BoardNetworkMode target_mode = BoardNetworkMode::UNSUPPORTED;
+    BoardNetworkPhase phase = BoardNetworkPhase::OFFLINE;
+    bool link_up = false;
+    uint32_t generation = 0;
+};
+
 enum class BleSetupMode : uint8_t {
     BIND_ONLY = 0x00,
     WIFI_PROVISION_AND_BIND = 0x01,
@@ -95,6 +115,14 @@ public:
     virtual std::string GetBoardJson() = 0;
     virtual std::string GetDeviceStatusJson() = 0;
     virtual BoardNetworkMode GetActiveNetworkMode() { return BoardNetworkMode::UNSUPPORTED; }
+    virtual BoardNetworkStatus GetNetworkStatus() {
+        BoardNetworkStatus status;
+        status.active_mode = GetActiveNetworkMode();
+        status.target_mode = status.active_mode;
+        status.link_up = status.active_mode != BoardNetworkMode::UNSUPPORTED;
+        status.phase = status.link_up ? BoardNetworkPhase::ONLINE : BoardNetworkPhase::OFFLINE;
+        return status;
+    }
     virtual bool SwitchActiveNetworkMode(BoardNetworkMode mode) { (void)mode; return false; }
     virtual bool EnterBleBindMode(BleSetupMode setup_mode = BleSetupMode::BIND_ONLY) {
         (void)setup_mode;

@@ -67,6 +67,12 @@ const char* GetInitialNetworkModeIcon(Board& board) {
             return FONT_AWESOME_WIFI_SLASH;
     }
 }
+
+bool IsNetworkTransition(BoardNetworkPhase phase) {
+    return phase == BoardNetworkPhase::CONNECTING ||
+           phase == BoardNetworkPhase::SWITCHING ||
+           phase == BoardNetworkPhase::PROVISIONING;
+}
 }  // namespace
 
 /**
@@ -702,7 +708,9 @@ void LcdDisplay::UpdateWifiModeSwitchButton() {
 
     auto& app = Application::GetInstance();
     auto& board = Board::GetInstance();
-    BoardNetworkMode mode = board.GetActiveNetworkMode();
+    const BoardNetworkStatus network_status = board.GetNetworkStatus();
+    BoardNetworkMode mode = network_status.active_mode;
+    const bool network_switching = IsNetworkTransition(network_status.phase);
     DeviceState state = app.GetDeviceState();
     auto* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
     lv_coord_t bottom_offset = lvgl_theme != nullptr ? static_cast<lv_coord_t>(lvgl_theme->spacing(6)) : 12;
@@ -714,19 +722,23 @@ void LcdDisplay::UpdateWifiModeSwitchButton() {
 
     const bool ota_upgrade_in_progress = app.IsOtaUpgradeInProgress();
     const bool app_ota_network_switch_pending = app.IsOtaNetworkSwitchPending();
+    const bool network_selectable = mode != BoardNetworkMode::UNSUPPORTED ||
+                                    network_status.phase == BoardNetworkPhase::OFFLINE ||
+                                    network_status.phase == BoardNetworkPhase::FAILED ||
+                                    network_switching;
     if (!ota_upgrade_in_progress || !app_ota_network_switch_pending) {
         ota_network_switch_pending_ = false;
     }
 
     bool show_wifi_config_switch = state == kDeviceStateWifiConfiguring &&
-                                   !wifi_mode_switch_pending_ &&
-                                   mode != BoardNetworkMode::UNSUPPORTED &&
+                                   (!wifi_mode_switch_pending_ || network_switching) &&
+                                   network_selectable &&
                                    mode != BoardNetworkMode::CELLULAR;
     bool show_ota_switch = ota_upgrade_in_progress &&
                            state != kDeviceStateWifiConfiguring &&
-                           !app_ota_network_switch_pending &&
-                           !ota_network_switch_pending_ &&
-                           mode != BoardNetworkMode::UNSUPPORTED;
+                           (!app_ota_network_switch_pending || network_switching) &&
+                           (!ota_network_switch_pending_ || network_switching) &&
+                           network_selectable;
     if (!show_wifi_config_switch && !show_ota_switch) {
         if (!ota_upgrade_in_progress || !app_ota_network_switch_pending) {
             ota_network_switch_pending_ = false;
@@ -735,7 +747,10 @@ void LcdDisplay::UpdateWifiModeSwitchButton() {
         return;
     }
 
-    if (mode == BoardNetworkMode::WIFI) {
+    if (network_switching) {
+        lv_obj_add_state(ota_wifi_switch_btn_, LV_STATE_DISABLED);
+        lv_obj_add_state(ota_4g_switch_btn_, LV_STATE_DISABLED);
+    } else if (mode == BoardNetworkMode::WIFI) {
         lv_obj_add_state(ota_wifi_switch_btn_, LV_STATE_DISABLED);
         lv_obj_clear_state(ota_4g_switch_btn_, LV_STATE_DISABLED);
     } else if (mode == BoardNetworkMode::CELLULAR) {
@@ -761,8 +776,13 @@ void LcdDisplay::UpdateWifiModeSwitchButton() {
 
 void LcdDisplay::OnOtaNetworkSwitchButtonClicked(BoardNetworkMode target) {
     auto& board = Board::GetInstance();
-    BoardNetworkMode mode = board.GetActiveNetworkMode();
-    if (mode == BoardNetworkMode::UNSUPPORTED || mode == target) {
+    const BoardNetworkStatus network_status = board.GetNetworkStatus();
+    BoardNetworkMode mode = network_status.active_mode;
+    if (IsNetworkTransition(network_status.phase)) {
+        UpdateWifiModeSwitchButton();
+        return;
+    }
+    if (network_status.link_up && mode == target) {
         ota_network_switch_pending_ = false;
         UpdateWifiModeSwitchButton();
         return;

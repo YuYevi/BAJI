@@ -4,6 +4,7 @@
 #include <memory>
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <at_modem.h>
 #include "board.h"
 
@@ -15,6 +16,7 @@ protected:
     gpio_num_t rx_pin_;
     gpio_num_t dtr_pin_;
     NetworkEventCallback network_event_callback_;
+    std::mutex network_event_callback_mutex_;
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> running_{false};
     int cached_csq_ = -1;

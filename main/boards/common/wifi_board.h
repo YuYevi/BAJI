@@ -22,6 +22,7 @@ protected:
     std::atomic_bool suppress_config_exit_reconnect_{false};
     bool wifi_scan_notified_ = false;
     NetworkEventCallback network_event_callback_ = nullptr;
+    std::mutex network_event_callback_mutex_;
     std::atomic_bool wifi_auto_reconnect_enabled_{true};
     std::atomic_bool blufi_audio_suspended_{false};
     std::atomic_bool wifi_manager_initialized_{false};

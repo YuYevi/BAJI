@@ -1189,10 +1189,60 @@ void Application::Initialize() {
     });
 
     board.SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
-        Schedule([this, event, data]() {
-        auto display = Board::GetInstance().GetDisplay();
+        // Capture the managed-network snapshot at the producer side.  The
+        // callback is asynchronous: by the time the scheduled application
+        // task runs, a newer handoff may already have invalidated this event.
+        const BoardNetworkStatus event_status = Board::GetInstance().GetNetworkStatus();
+        const bool has_managed_generation = event_status.generation != 0;
 
-        switch (event) {
+        Schedule([this, event, data, event_status, has_managed_generation]() {
+            if (has_managed_generation) {
+                const BoardNetworkStatus current_status = Board::GetInstance().GetNetworkStatus();
+                bool stale = current_status.generation != event_status.generation;
+
+                // Connected is a commit event.  It is valid only if the same
+                // generation is still the active, link-up, online backend.
+                if (!stale && event == NetworkEvent::Connected) {
+                    stale = event_status.active_mode == BoardNetworkMode::UNSUPPORTED ||
+                            current_status.active_mode != event_status.active_mode ||
+                            current_status.phase != BoardNetworkPhase::ONLINE ||
+                            !current_status.link_up;
+                }
+
+                // A queued disconnect must not tear down a protocol that has
+                // already re-established a link before the application task got
+                // to process this callback.
+                if (!stale && event == NetworkEvent::Disconnected) {
+                    stale = current_status.link_up;
+                }
+
+                // Progress/error notifications from a previous phase must not
+                // overwrite an already committed online state (for example, a
+                // delayed modem timeout arriving after registration succeeded).
+                if (!stale &&
+                    (event == NetworkEvent::Scanning || event == NetworkEvent::Connecting ||
+                     event == NetworkEvent::ModemDetecting ||
+                     event == NetworkEvent::ModemErrorNoSim ||
+                     event == NetworkEvent::ModemErrorRegDenied ||
+                     event == NetworkEvent::ModemErrorInitFailed ||
+                     event == NetworkEvent::ModemErrorTimeout)) {
+                    stale = current_status.phase == BoardNetworkPhase::ONLINE &&
+                            current_status.link_up;
+                }
+
+                if (stale) {
+                    ESP_LOGD(TAG,
+                             "Ignoring stale network event %d (generation %u, current %u)",
+                             static_cast<int>(event),
+                             static_cast<unsigned>(event_status.generation),
+                             static_cast<unsigned>(current_status.generation));
+                    return;
+                }
+            }
+
+            auto display = Board::GetInstance().GetDisplay();
+
+            switch (event) {
             case NetworkEvent::Scanning:
                 display->ShowPersistentNotification(Lang::Strings::SCANNING_WIFI, true);
                 xEventGroupSetBits(event_group_, MAIN_EVENT_NETWORK_DISCONNECTED);
@@ -1248,8 +1298,8 @@ void Application::Initialize() {
             case NetworkEvent::ModemErrorTimeout:
                 display->SetStatus(Lang::Strings::REGISTERING_NETWORK);
                 break;
-        }
-    });
+            }
+        });
     });
 
     board.StartNetwork();
@@ -3089,7 +3139,28 @@ bool Application::RequestOtaNetworkSwitch(BoardNetworkMode target) {
     }
 
     auto& board = Board::GetInstance();
-    if (board.GetActiveNetworkMode() == target) {
+    const BoardNetworkStatus status = board.GetNetworkStatus();
+    const bool network_transition_in_flight =
+        status.phase == BoardNetworkPhase::CONNECTING ||
+        status.phase == BoardNetworkPhase::SWITCHING ||
+        status.phase == BoardNetworkPhase::PROVISIONING;
+
+    // A target already being brought up is an idempotent request.  Do not
+    // call into the board again: that would make a UI retry look like a new
+    // handoff and could reset the board's request bookkeeping.
+    if (network_transition_in_flight) {
+        if (status.target_mode != target) {
+            return false;
+        }
+        NotifyOtaNetworkSwitchRequested(target);
+        return true;
+    }
+
+    // Only report success without starting a handoff when the requested
+    // backend is really online.  GetActiveNetworkMode() intentionally does
+    // not carry this readiness guarantee on all board implementations.
+    if (status.phase == BoardNetworkPhase::ONLINE && status.link_up &&
+        status.active_mode == target) {
         return true;
     }
 

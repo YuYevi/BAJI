@@ -96,15 +96,74 @@ extern "C" bool app_device_get_network_mode_is_4g(void)
 extern "C" bool app_device_switch_network_mode(bool use_4g)
 {
     auto& board = Board::GetInstance();
-    BoardNetworkMode active = board.GetActiveNetworkMode();
     BoardNetworkMode target = use_4g ? BoardNetworkMode::CELLULAR : BoardNetworkMode::WIFI;
-    if (active != BoardNetworkMode::UNSUPPORTED) {
+    if (board.SwitchActiveNetworkMode(target)) {
+        return true;
+    }
+
+    // A runtime-capable board may be offline while still owning a target
+    // mode.  Do not overwrite that request with the boot preference.
+    const BoardNetworkStatus status = board.GetNetworkStatus();
+    const bool transition_in_flight =
+        status.phase == BoardNetworkPhase::CONNECTING ||
+        status.phase == BoardNetworkPhase::SWITCHING ||
+        status.phase == BoardNetworkPhase::PROVISIONING;
+    if ((status.phase == BoardNetworkPhase::ONLINE && status.link_up &&
+         status.active_mode == target) ||
+        (transition_in_flight && status.target_mode == target)) {
+        return true;
+    }
+    if (status.target_mode != BoardNetworkMode::UNSUPPORTED ||
+        status.phase != BoardNetworkPhase::OFFLINE) {
+        return false;
+    }
+
+    if (board.GetActiveNetworkMode() != BoardNetworkMode::UNSUPPORTED) {
         return board.SwitchActiveNetworkMode(target);
     }
 
     Settings settings("network", true);
     settings.SetInt("type", use_4g ? 1 : 0);
     return false;
+}
+
+extern "C" bool app_device_get_network_status(app_device_network_status_t *status)
+{
+    if (status == nullptr) {
+        return false;
+    }
+
+    const BoardNetworkStatus snapshot = Board::GetInstance().GetNetworkStatus();
+    switch (snapshot.active_mode) {
+        case BoardNetworkMode::WIFI:
+            status->active_mode = APP_DEVICE_NETWORK_WIFI;
+            break;
+        case BoardNetworkMode::CELLULAR:
+            status->active_mode = APP_DEVICE_NETWORK_4G;
+            break;
+        case BoardNetworkMode::UNSUPPORTED:
+        default:
+            status->active_mode = APP_DEVICE_NETWORK_UNSUPPORTED;
+            break;
+    }
+
+    switch (snapshot.target_mode) {
+        case BoardNetworkMode::WIFI:
+            status->target_mode = APP_DEVICE_NETWORK_WIFI;
+            break;
+        case BoardNetworkMode::CELLULAR:
+            status->target_mode = APP_DEVICE_NETWORK_4G;
+            break;
+        case BoardNetworkMode::UNSUPPORTED:
+        default:
+            status->target_mode = APP_DEVICE_NETWORK_UNSUPPORTED;
+            break;
+    }
+
+    status->phase = static_cast<uint8_t>(snapshot.phase);
+    status->link_up = snapshot.link_up;
+    status->generation = snapshot.generation;
+    return true;
 }
 
 extern "C" bool app_device_get_auto_power_save_enabled(void)
