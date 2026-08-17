@@ -120,11 +120,13 @@
 #define ML307_EDRX_VALUE                "0011"          // EDRX值
 
 /*
- * OTA identity fields
+ * OTA identity fields. These values seed the nvsfactory partition on the
+ * first boot after a complete flash; subsequent OTA images cannot change the
+ * reported identity.
  * role: MJQ / DCX / SYX / LYW / ZZY / YHX / HJL
  * network_version: WIFI / 4G
  */
-#define BAJI_OTA_ROLE                   ""
+#define BAJI_OTA_ROLE                   "MJQ"
 #define BAJI_OTA_NETWORK_VERSION        "4G"
 
 /*

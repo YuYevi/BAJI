@@ -16,6 +16,7 @@
 #include <atomic>
 #include <mutex>
 #include <new>
+#include <utility>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
@@ -29,6 +30,8 @@
 #include <esp_lcd_st77916.h>
 #include <esp_task_wdt.h>
 #include <esp_timer.h>
+#include <nvs.h>
+#include <nvs_flash.h>
 #include <iot_button.h>
 #include <button_types.h>
 #include <font_awesome.h>
@@ -58,6 +61,149 @@
 #include "axp2101.h"
 
 #define TAG "baji_lcd_1_85"
+
+namespace {
+
+// The factory identity lives in its own NVS partition.  OTA only replaces an
+// application partition, so values written here survive every normal OTA
+// update.  A full flash/partition erase is still the deliberate way to create
+// a new device identity.
+constexpr const char* kFactoryNvsPartition = "nvsfactory";
+// Keep this namespace and the key names stable across firmware releases.
+constexpr const char* kFactoryNvsNamespace = "baji_identity";
+constexpr const char* kFactoryRoleKey = "ota_role";
+constexpr const char* kFactoryNetworkVersionKey = "ota_netver";
+
+bool IsValidFactoryRole(const std::string& role) {
+    return role.empty() || role == "MJQ" || role == "DCX" || role == "SYX" ||
+           role == "LYW" || role == "ZZY" || role == "YHX" || role == "HJL";
+}
+
+bool IsValidFactoryNetworkVersion(const std::string& network_version) {
+    return network_version == "4G" || network_version == "WIFI";
+}
+
+// Return the NVS status instead of collapsing all failures into "missing".
+// This is important because a corrupt/read-error entry must never be silently
+// replaced by a value from a later OTA image.
+esp_err_t ReadFactoryString(nvs_handle_t handle, const char* key, std::string* value) {
+    size_t length = 0;
+    esp_err_t ret = nvs_get_str(handle, key, nullptr, &length);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    std::string storage(length, '\0');
+    ret = nvs_get_str(handle, key, storage.data(), &length);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    if (!storage.empty() && storage.back() == '\0') {
+        storage.pop_back();
+    }
+    *value = std::move(storage);
+    return ESP_OK;
+}
+
+struct BajiFactoryIdentity {
+    std::string role;
+    std::string network_version;
+};
+
+BajiFactoryIdentity LoadBajiFactoryIdentity() {
+    // These defaults are used only when the factory partition is blank (the
+    // first boot after a complete flash).  Once a key exists, the compiled
+    // macros are intentionally ignored forever for that device.
+    BajiFactoryIdentity identity{
+        IsValidFactoryRole(BAJI_OTA_ROLE) ? std::string(BAJI_OTA_ROLE) : std::string(),
+        IsValidFactoryNetworkVersion(BAJI_OTA_NETWORK_VERSION)
+            ? std::string(BAJI_OTA_NETWORK_VERSION)
+            : std::string("WIFI"),
+    };
+
+    esp_err_t ret = nvs_flash_init_partition(kFactoryNvsPartition);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize factory identity partition: %s",
+                 esp_err_to_name(ret));
+        return identity;
+    }
+
+    nvs_handle_t handle = 0;
+    ret = nvs_open_from_partition(kFactoryNvsPartition, kFactoryNvsNamespace,
+                                  NVS_READWRITE, &handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open factory identity namespace: %s",
+                 esp_err_to_name(ret));
+
+        // Preserve an already provisioned identity even if this boot cannot
+        // obtain a writable handle.  No write is attempted in this path.
+        if (nvs_open_from_partition(kFactoryNvsPartition, kFactoryNvsNamespace,
+                                    NVS_READONLY, &handle) != ESP_OK) {
+            return identity;
+        }
+
+        std::string stored_value;
+        if (ReadFactoryString(handle, kFactoryRoleKey, &stored_value) == ESP_OK) {
+            identity.role = std::move(stored_value);
+        }
+        if (ReadFactoryString(handle, kFactoryNetworkVersionKey, &stored_value) == ESP_OK) {
+            identity.network_version = std::move(stored_value);
+        }
+        nvs_close(handle);
+        return identity;
+    }
+
+    bool dirty = false;
+    std::string stored_value;
+
+    ret = ReadFactoryString(handle, kFactoryRoleKey, &stored_value);
+    if (ret == ESP_OK) {
+        identity.role = std::move(stored_value);
+    } else if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        ret = nvs_set_str(handle, kFactoryRoleKey, identity.role.c_str());
+        if (ret == ESP_OK) {
+            dirty = true;
+            ESP_LOGI(TAG, "Provisioned factory OTA role: '%s'", identity.role.c_str());
+        } else {
+            ESP_LOGE(TAG, "Failed to provision factory OTA role: %s",
+                     esp_err_to_name(ret));
+        }
+    } else {
+        ESP_LOGE(TAG, "Failed to read factory OTA role: %s", esp_err_to_name(ret));
+    }
+
+    ret = ReadFactoryString(handle, kFactoryNetworkVersionKey, &stored_value);
+    if (ret == ESP_OK) {
+        identity.network_version = std::move(stored_value);
+    } else if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        ret = nvs_set_str(handle, kFactoryNetworkVersionKey,
+                          identity.network_version.c_str());
+        if (ret == ESP_OK) {
+            dirty = true;
+            ESP_LOGI(TAG, "Provisioned factory OTA network version: '%s'",
+                     identity.network_version.c_str());
+        } else {
+            ESP_LOGE(TAG, "Failed to provision factory OTA network version: %s",
+                     esp_err_to_name(ret));
+        }
+    } else {
+        ESP_LOGE(TAG, "Failed to read factory OTA network version: %s",
+                 esp_err_to_name(ret));
+    }
+
+    if (dirty) {
+        ret = nvs_commit(handle);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to commit factory OTA identity: %s",
+                     esp_err_to_name(ret));
+        }
+    }
+    nvs_close(handle);
+    return identity;
+}
+
+}  // namespace
 
 #define LCD_OPCODE_WRITE_CMD    (0x02ULL)
 #define LCD_OPCODE_READ_CMD     (0x03ULL)
@@ -616,6 +762,8 @@ private:
     bool auto_power_restore_pending_ = false;    ///< 是否记录了开启前的亮度/音量
     uint8_t auto_power_saved_brightness_ = 100;  ///< 开启前亮度
     uint8_t auto_power_saved_volume_ = 100;      ///< 开启前音量
+    std::string factory_ota_role_;
+    std::string factory_ota_network_version_;
 
     /** 网络模式枚举 */
     enum class NetMode {
@@ -2015,6 +2163,10 @@ public:
      * @brief CustomBoard构造函数
      */
     CustomBoard() {
+        const BajiFactoryIdentity factory_identity = LoadBajiFactoryIdentity();
+        factory_ota_role_ = factory_identity.role;
+        factory_ota_network_version_ = factory_identity.network_version;
+
         Settings settings("network", true);
         prefer_4g_on_boot_ = (settings.GetInt("type", 1) == 1);
 
@@ -2054,21 +2206,14 @@ public:
         }
     }
 
+    // These are factory identity values, not the current network backend or
+    // the remotely downloadable role assets.
     std::string GetDeviceRole() override {
-        const std::string role = BAJI_OTA_ROLE;
-        if (!role.empty()) {
-            return (role == "MJQ" || role == "DCX" || role == "SYX" || role == "LYW" ||
-                    role == "ZZY" || role == "YHX" || role == "HJL")
-                       ? role
-                       : "";
-        }
-        return Board::GetDeviceRole();
+        return factory_ota_role_;
     }
 
     std::string GetDeviceNetworkVersion() override {
-        const std::string network_version = BAJI_OTA_NETWORK_VERSION;
-        return (network_version == "4G" || network_version == "WIFI") ? network_version
-                                                                        : "WIFI";
+        return factory_ota_network_version_;
     }
 
     /**
