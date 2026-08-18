@@ -1742,8 +1742,12 @@ private:
         const BoardNetworkMode active_mode = active_network_mode_.load();
         const BoardNetworkMode pending_mode = target_network_mode_.load();
         const NetFlowState flow_state = GetNetFlowState();
+        const bool leaving_wifi_provisioning =
+            flow_state == NetFlowState::WifiProvisioning &&
+            requested_mode == BoardNetworkMode::CELLULAR;
         const bool flow_in_flight = flow_state != NetFlowState::Idle &&
-                                    flow_state != NetFlowState::Failed;
+                                    flow_state != NetFlowState::Failed &&
+                                    !leaving_wifi_provisioning;
         const bool task_in_flight = net_switch_task_ != nullptr ||
                                     fourg_boot_task_ != nullptr ||
                                     wifi_reprovision_task_ != nullptr ||
@@ -1767,7 +1771,9 @@ private:
             return true;
         }
 
-        if (IsApplicationBusyForNetOp() && !Application::GetInstance().IsOtaUpgradeInProgress()) {
+        if (IsApplicationBusyForNetOp() &&
+            !Application::GetInstance().IsOtaUpgradeInProgress() &&
+            !leaving_wifi_provisioning) {
             if (show_notification) {
                 ShowApplicationBusyNotification();
             }
