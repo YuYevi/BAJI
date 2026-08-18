@@ -711,8 +711,8 @@ void LcdDisplay::UpdateWifiModeSwitchButton() {
     const BoardNetworkStatus network_status = board.GetNetworkStatus();
     BoardNetworkMode mode = network_status.active_mode;
     DeviceState state = app.GetDeviceState();
-    const bool wifi_provisioning = state == kDeviceStateWifiConfiguring &&
-                                   network_status.phase == BoardNetworkPhase::PROVISIONING;
+    const bool wifi_provisioning =
+        network_status.phase == BoardNetworkPhase::PROVISIONING;
     const bool network_switching = IsNetworkTransition(network_status.phase) &&
                                    !wifi_provisioning;
     const BoardNetworkMode selected_mode = mode != BoardNetworkMode::UNSUPPORTED
@@ -743,8 +743,8 @@ void LcdDisplay::UpdateWifiModeSwitchButton() {
                                    mode != BoardNetworkMode::CELLULAR;
     bool show_ota_switch = ota_upgrade_in_progress &&
                            state != kDeviceStateWifiConfiguring &&
-                           (!app_ota_network_switch_pending || network_switching) &&
-                           (!ota_network_switch_pending_ || network_switching) &&
+                           (!app_ota_network_switch_pending || network_switching || wifi_provisioning) &&
+                           (!ota_network_switch_pending_ || network_switching || wifi_provisioning) &&
                            network_selectable;
     if (!show_wifi_config_switch && !show_ota_switch) {
         if (!ota_upgrade_in_progress || !app_ota_network_switch_pending) {
@@ -768,7 +768,7 @@ void LcdDisplay::UpdateWifiModeSwitchButton() {
         lv_obj_clear_state(ota_4g_switch_btn_, LV_STATE_DISABLED);
     }
 
-    if (bottom_bar_ != nullptr && !lv_obj_has_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN)) {
+    if (bottom_bar_ != nullptr) {
         lv_obj_align_to(ota_network_switch_container_, bottom_bar_, LV_ALIGN_OUT_TOP_MID, 0, -gap);
     } else {
         lv_obj_align(ota_network_switch_container_, LV_ALIGN_BOTTOM_MID, 0, -bottom_offset);
@@ -787,8 +787,8 @@ void LcdDisplay::OnOtaNetworkSwitchButtonClicked(BoardNetworkMode target) {
     const BoardNetworkStatus network_status = board.GetNetworkStatus();
     BoardNetworkMode mode = network_status.active_mode;
     const bool leaving_wifi_provisioning =
-        app.GetDeviceState() == kDeviceStateWifiConfiguring &&
         network_status.phase == BoardNetworkPhase::PROVISIONING &&
+        network_status.target_mode == BoardNetworkMode::WIFI &&
         target == BoardNetworkMode::CELLULAR;
     if (IsNetworkTransition(network_status.phase) && !leaving_wifi_provisioning) {
         UpdateWifiModeSwitchButton();

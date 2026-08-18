@@ -3144,12 +3144,27 @@ bool Application::RequestOtaNetworkSwitch(BoardNetworkMode target) {
         status.phase == BoardNetworkPhase::CONNECTING ||
         status.phase == BoardNetworkPhase::SWITCHING ||
         status.phase == BoardNetworkPhase::PROVISIONING;
+    const bool leaving_wifi_provisioning =
+        status.phase == BoardNetworkPhase::PROVISIONING &&
+        status.target_mode == BoardNetworkMode::WIFI &&
+        target == BoardNetworkMode::CELLULAR;
 
     // A target already being brought up is an idempotent request.  Do not
     // call into the board again: that would make a UI retry look like a new
     // handoff and could reset the board's request bookkeeping.
     if (network_transition_in_flight) {
-        if (status.target_mode != target) {
+        if (status.target_mode == target) {
+            NotifyOtaNetworkSwitchRequested(target);
+            return true;
+        }
+        if (!leaving_wifi_provisioning) {
+            return false;
+        }
+
+        // The OTA wait loop supports target changes.  Let the user escape a
+        // WiFi provisioning wait without clearing the existing request if the
+        // board cannot start the 4G handoff.
+        if (!board.SwitchActiveNetworkMode(target)) {
             return false;
         }
         NotifyOtaNetworkSwitchRequested(target);
