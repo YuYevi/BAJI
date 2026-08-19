@@ -68,11 +68,13 @@ const char* GetInitialNetworkModeIcon(Board& board) {
     }
 }
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
 bool IsNetworkTransition(BoardNetworkPhase phase) {
     return phase == BoardNetworkPhase::CONNECTING ||
            phase == BoardNetworkPhase::SWITCHING ||
            phase == BoardNetworkPhase::PROVISIONING;
 }
+#endif
 }  // namespace
 
 /**
@@ -554,6 +556,7 @@ LcdDisplay::~LcdDisplay() {
     if (bottom_bar_ != nullptr) {
         lv_obj_del(bottom_bar_);
     }
+#ifndef CONFIG_BAJI_WIFI_ONLY
     if (ota_network_switch_container_ != nullptr) {
         ota_wifi_switch_btn_ = nullptr;
         ota_wifi_switch_label_ = nullptr;
@@ -561,6 +564,7 @@ LcdDisplay::~LcdDisplay() {
         ota_4g_switch_label_ = nullptr;
         lv_obj_del(ota_network_switch_container_);
     }
+#endif
     if (status_bar_ != nullptr) {
         notification_label_ = nullptr;
         status_label_ = nullptr;
@@ -631,6 +635,7 @@ void LcdDisplay::Unlock() {
     lvgl_port_unlock();
 }
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
 void LcdDisplay::CreateNetworkSwitchButtons(lv_obj_t* screen, const lv_font_t* text_font,
                                             LvglTheme* lvgl_theme) {
     if (screen == nullptr || text_font == nullptr || lvgl_theme == nullptr ||
@@ -815,6 +820,7 @@ void LcdDisplay::OnOtaNetworkSwitchButtonClicked(BoardNetworkMode target) {
     }
     UpdateWifiModeSwitchButton();
 }
+#endif
 
 void LcdDisplay::SetStatus(const char* status) {
     if (!smart_watch_ui_active_) {
@@ -1118,7 +1124,9 @@ void LcdDisplay::SetupUI() {
     // 初始化聊天消息标签
     chat_message_label_ = nullptr;
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
     CreateNetworkSwitchButtons(screen, text_font, lvgl_theme);
+#endif
 
     // 创建低电量弹窗
     low_battery_popup_ = lv_obj_create(screen);
@@ -1699,7 +1707,9 @@ void LcdDisplay::SetupUI() {
     lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);  
 #endif
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
     CreateNetworkSwitchButtons(screen, text_font, lvgl_theme);
+#endif
 
     low_battery_popup_ = lv_obj_create(screen);
     lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);

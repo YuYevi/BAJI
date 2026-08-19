@@ -415,6 +415,11 @@ void WifiBoard::StartWifiConfigMode(uint32_t expected_generation) {
                     }
 
                     in_config_mode_.store(false);
+                    // BLUFI has already been deinitialized after successful
+                    // credential validation. Do not leave the bind-mode flag
+                    // set, or the application will keep waiting on the old
+                    // provisioning UI instead of starting normal Wi-Fi.
+                    ble_bind_mode_active_.store(false);
                     ClearWifiConfigNotifications();
                     OnNetworkEvent(NetworkEvent::WifiConfigModeExit);
                     if (Application::GetInstance().GetDeviceState() != kDeviceStateActivating) {
@@ -444,6 +449,7 @@ void WifiBoard::StartWifiConfigMode(uint32_t expected_generation) {
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start BLUFI: %s", esp_err_to_name(ret));
+        ble_bind_mode_active_.store(false);
         const bool reconnect_saved_wifi =
             !SsidManager::GetInstance().GetSsidList().empty() &&
             wifi_auto_reconnect_enabled_.load();
@@ -574,6 +580,7 @@ void WifiBoard::StopWifiConfigMode(bool reconnect) {
         std::lock_guard<std::mutex> stack_lock(blufi_stack_lifecycle_mutex_);
         ret = Blufi::GetInstance().deinit();
     }
+    ble_bind_mode_active_.store(false);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to stop BLUFI: %s", esp_err_to_name(ret));
     }

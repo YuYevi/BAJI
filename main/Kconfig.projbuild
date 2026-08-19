@@ -508,6 +508,14 @@ choice BOARD_TYPE
         depends on IDF_TARGET_ESP32S3
 endchoice
 
+config BAJI_WIFI_ONLY
+    bool "Build BAJI WiFi-only variant"
+    depends on BOARD_TYPE_BAJI_ESP32_S3_TOUCH_LCD_1_85
+    default n
+    help
+        Build the BAJI-185 without the cellular modem backend or network
+        switching UI. WiFi and BLE/BluFi provisioning remain enabled.
+
 choice
     depends on BOARD_TYPE_LILYGO_T_DISPLAY_P4
     prompt "Select the screen type"

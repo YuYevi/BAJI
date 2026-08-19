@@ -79,8 +79,10 @@
 #define CST816S_TOUCH_RST_PIN           QSPI_PIN_NUM_LCD_RST_VIRTUAL    // 触控复位引脚（与LCD共用）
 
 // IO扩展器引脚掩码
+#ifndef CONFIG_BAJI_WIFI_ONLY
 #define BAJI185_IOX_PIN_MASK_4G_PWRON   (1u << 0)   // 4G模块电源使能
 #define BAJI185_IOX_PIN_MASK_4G_RST     (1u << 1)   // 4G模块复位
+#endif
 #define BAJI185_IOX_PIN_MASK_VOL_UP     (1u << 2)   // 音量加
 #define BAJI185_IOX_PIN_MASK_VOL_DOWN   (1u << 3)   // 音量减
 #define BAJI185_IOX_PIN_MASK_PA         (1u << 5)   // 音频功率放大器
@@ -90,8 +92,10 @@
 #define BAJI185_RUN_LED_AUTO_BLINK      0           // 运行指示灯是否自动闪烁
 
 // 虚拟GPIO定义
+#ifndef CONFIG_BAJI_WIFI_ONLY
 #define ML307_MOD_PWRON_GPIO_VIRTUAL    ((gpio_num_t)(TCA9554_GPIO_VIRTUAL_BASE + 0))
 #define ML307_MOD_RST_GPIO_VIRTUAL      ((gpio_num_t)(TCA9554_GPIO_VIRTUAL_BASE + 1))
+#endif
 #define AUDIO_CODEC_PA_GPIO_VIRTUAL     ((gpio_num_t)(TCA9554_GPIO_VIRTUAL_BASE + 5))
 #define BAJI185_RUN_LED_GPIO_VIRTUAL    ((gpio_num_t)(TCA9554_GPIO_VIRTUAL_BASE + 6))
 #define QSPI_PIN_NUM_LCD_RST_VIRTUAL    ((gpio_num_t)(TCA9554_GPIO_VIRTUAL_BASE + 7))
@@ -108,6 +112,7 @@
 /*
  * UART配置
  */
+#ifndef CONFIG_BAJI_WIFI_ONLY
 #define UART0_DTR                       GPIO_NUM_38     // UART0 DTR引脚
 #define UART_4G_RXD                     GPIO_NUM_48     // 4G模块UART接收引脚
 #define UART_4G_TXD                     GPIO_NUM_47     // 4G模块UART发送引脚
@@ -118,6 +123,7 @@
 #define ML307_ENABLE_EDRX               1               // 是否启用EDRX
 #define ML307_EDRX_ACT                  7               // EDRX激活时间
 #define ML307_EDRX_VALUE                "0011"          // EDRX值
+#endif
 
 /*
  * OTA identity fields. These values seed the nvsfactory partition on the
@@ -127,7 +133,11 @@
  * network_version: WIFI / 4G
  */
 #define BAJI_OTA_ROLE                   ""
+#ifdef CONFIG_BAJI_WIFI_ONLY
+#define BAJI_OTA_NETWORK_VERSION        "WIFI"
+#else
 #define BAJI_OTA_NETWORK_VERSION        "4G"
+#endif
 
 /*
  * 显示配置

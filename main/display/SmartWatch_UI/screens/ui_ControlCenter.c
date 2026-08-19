@@ -20,7 +20,7 @@ extern const lv_image_dsc_t volume;
 #define HOME_CC_PANEL_SHADOW_DRAG   0
 #define HOME_CC_SLIDER_W            246
 #define HOME_CC_SLIDER_H            32
-#define HOME_CC_SLIDER_INSET        6
+#define HOME_CC_SLIDER_TOUCH_PAD     4
 #define HOME_CC_SLIDER_CAP_SIZE     6
 #define HOME_CC_SLIDER_JUMP_THR     72
 #define HOME_CC_OPEN_DRAG_THR       48
@@ -31,6 +31,17 @@ extern const lv_image_dsc_t volume;
 #define HOME_CC_FAST_CLOSE_VECT_Y   18
 #define HOME_CC_FAST_CLOSE_TRAVEL_Y 22
 
+#ifdef CONFIG_BAJI_WIFI_ONLY
+#define HOME_CC_BRIGHTNESS_ROW_Y 92
+#define HOME_CC_VOLUME_ROW_Y     156
+#define HOME_CC_POWER_ROW_Y      220
+#else
+#define HOME_CC_BRIGHTNESS_ROW_Y 120
+#define HOME_CC_VOLUME_ROW_Y     172
+#define HOME_CC_POWER_ROW_Y      224
+#endif
+
+#ifndef CONFIG_BAJI_WIFI_ONLY
 #define HOME_CC_NETWORK_WIFI 0
 #define HOME_CC_NETWORK_4G   1
 
@@ -39,6 +50,7 @@ typedef struct {
     lv_obj_t * icon;
     lv_obj_t * text;
 } home_cc_network_option_t;
+#endif
 
 typedef struct {
     lv_obj_t * track;
@@ -65,7 +77,9 @@ typedef struct {
     lv_obj_t * panel;
     lv_obj_t * close_zone;
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
     home_cc_network_option_t network[2];
+#endif
     home_cc_slider_t brightness;
     home_cc_slider_t volume;
 
@@ -77,12 +91,14 @@ typedef struct {
 
     home_cc_restart_confirm_t restart_confirm;
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
     uint8_t network_mode;
     uint8_t network_target;
     bool network_mode_valid;
     bool network_switching;
     bool network_switch_pending;
     lv_timer_t * network_status_timer;
+#endif
     bool auto_power_enabled;
     bool panel_open;
     bool panel_dragging;
@@ -101,7 +117,9 @@ static home_cc_context_t g_home_cc;
 
 static lv_color_t home_cc_color_bg(void)            { return lv_color_hex(0x11111d); }
 static lv_color_t home_cc_color_white(void)         { return lv_color_white(); }
+#ifndef CONFIG_BAJI_WIFI_ONLY
 static lv_color_t home_cc_color_purple(void)        { return lv_color_hex(0xA855F7); }
+#endif
 static lv_color_t home_cc_color_purple_border(void) { return lv_color_hex(0xC084FC); }
 static lv_color_t home_cc_color_yellow(void)        { return lv_color_hex(0xFBBF24); }
 static lv_color_t home_cc_color_teal(void)          { return lv_color_hex(0x0D9488); }
@@ -227,6 +245,7 @@ static void home_cc_style_slider_track(lv_obj_t * track)
     lv_obj_set_style_outline_width(track, 0, 0);
     lv_obj_add_flag(track, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(track, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_ext_click_area(track, HOME_CC_SLIDER_TOUCH_PAD);
 }
 
 /* 设置滑条填充区域样式。 */
@@ -310,6 +329,7 @@ static void home_cc_set_slider_value(home_cc_slider_t * slider,
     home_cc_update_slider_visual(slider);
 }
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
 /* 根据当前网络模式刷新两个切换按钮的视觉状态。 */
 static bool home_cc_network_phase_is_busy(uint8_t phase)
 {
@@ -375,6 +395,7 @@ static void home_cc_update_network_style(void)
         lv_obj_clear_state(four_g->btn, LV_STATE_DISABLED);
     }
 }
+#endif
 
 /* 根据当前状态刷新自动省电按钮与开关视觉。 */
 static void home_cc_update_auto_power_style(void)
@@ -413,6 +434,7 @@ static void home_cc_update_auto_power_style(void)
     lv_obj_set_x(g_home_cc.auto_power_knob, g_home_cc.auto_power_enabled ? 14 : 2);
 }
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
 /* 从设备读取当前设置，并同步刷新控制中心显示。 */
 static void home_cc_sync_network_from_device(void)
 {
@@ -449,17 +471,23 @@ static void home_cc_sync_network_from_device(void)
     }
     home_cc_update_network_style();
 }
+#endif
 
 static void home_cc_sync_from_device(void)
 {
+#ifndef CONFIG_BAJI_WIFI_ONLY
     home_cc_sync_network_from_device();
+#endif
     g_home_cc.auto_power_enabled = app_device_get_auto_power_save_enabled();
     home_cc_set_slider_value(&g_home_cc.brightness, app_device_get_brightness(), false, false);
     home_cc_set_slider_value(&g_home_cc.volume, app_device_get_volume(), false, false);
+#ifndef CONFIG_BAJI_WIFI_ONLY
     home_cc_update_network_style();
+#endif
     home_cc_update_auto_power_style();
 }
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
 static void home_cc_network_status_timer_cb(lv_timer_t * timer)
 {
     (void)timer;
@@ -468,6 +496,7 @@ static void home_cc_network_status_timer_cb(lv_timer_t * timer)
         home_cc_sync_network_from_device();
     }
 }
+#endif
 
 /* 限制面板 Y 坐标，避免拖出可视范围。 */
 static int32_t home_cc_clamp_panel_y(int32_t y)
@@ -653,6 +682,7 @@ static void home_cc_show_panel(bool open)
     home_cc_finish_panel_state(open);
 }
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
 /* 处理 WiFi 与 4G 切换事件。 */
 static void home_cc_network_event_cb(lv_event_t * e)
 {
@@ -674,6 +704,7 @@ static void home_cc_network_event_cb(lv_event_t * e)
     g_home_cc.network_switching = true;
     home_cc_update_network_style();
 }
+#endif
 
 /* 处理亮度和音量滑条事件。 */
 static void home_cc_slider_event_cb(lv_event_t * e)
@@ -709,8 +740,10 @@ static void home_cc_slider_event_cb(lv_event_t * e)
     }
 
     lv_obj_get_coords(slider->track, &coords);
-    int32_t rel_x = point.x - coords.x1 - HOME_CC_SLIDER_INSET;
-    int32_t value = (rel_x * 100) / (HOME_CC_SLIDER_W - HOME_CC_SLIDER_INSET * 2);
+    int32_t track_w = lv_area_get_width(&coords);
+    int32_t value_range = track_w > 1 ? track_w - 1 : 1;
+    int32_t rel_x = point.x - coords.x1;
+    int32_t value = (rel_x * 100 + value_range / 2) / value_range;
 
     if(value < 0) value = 0;
     if(value > 100) value = 100;
@@ -881,6 +914,7 @@ static lv_obj_t * home_cc_create_value_label(lv_obj_t * parent)
     return label;
 }
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
 /* 创建单个网络模式切换按钮。 */
 static void home_cc_build_network_option(lv_obj_t * parent,
                                          home_cc_network_option_t * option,
@@ -927,6 +961,7 @@ static void home_cc_build_network_row(lv_obj_t * parent)
     home_cc_build_network_option(row, &g_home_cc.network[HOME_CC_NETWORK_WIFI], FONT_AWESOME_WIFI, "WiFi", HOME_CC_NETWORK_WIFI);
     home_cc_build_network_option(row, &g_home_cc.network[HOME_CC_NETWORK_4G], FONT_AWESOME_SIGNAL_STRONG, "4G", HOME_CC_NETWORK_4G);
 }
+#endif
 
 /* 构建亮度或音量滑条行。 */
 static void home_cc_build_slider_row(lv_obj_t * parent,
@@ -969,7 +1004,7 @@ static void home_cc_build_slider_row(lv_obj_t * parent,
 static void home_cc_build_power_row(lv_obj_t * parent)
 {
     lv_obj_t * row = home_cc_create_plain_obj(parent, 330, 42);
-    lv_obj_set_pos(row, 15, 224);
+    lv_obj_set_pos(row, 15, HOME_CC_POWER_ROW_Y);
     lv_obj_set_style_pad_gap(row, 8, 0);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -1137,10 +1172,12 @@ static void home_cc_build_panel(void)
     lv_obj_set_style_text_letter_space(title, 1, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 46);
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
     home_cc_build_network_row(g_home_cc.panel);
-    home_cc_build_slider_row(g_home_cc.panel, 120, &g_home_cc.brightness, &luminance,
+#endif
+    home_cc_build_slider_row(g_home_cc.panel, HOME_CC_BRIGHTNESS_ROW_Y, &g_home_cc.brightness, &luminance,
                              home_cc_color_yellow(), home_cc_color_yellow());
-    home_cc_build_slider_row(g_home_cc.panel, 172, &g_home_cc.volume, &volume,
+    home_cc_build_slider_row(g_home_cc.panel, HOME_CC_VOLUME_ROW_Y, &g_home_cc.volume, &volume,
                              home_cc_color_purple_border(), home_cc_color_purple_border());
     home_cc_build_power_row(g_home_cc.panel);
     home_cc_build_restart_confirm();
@@ -1189,7 +1226,9 @@ void ui_ControlCenter_init(lv_obj_t * screen)
     home_cc_build_close_zone();
     home_cc_build_pull_zone();
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
     g_home_cc.network_status_timer = lv_timer_create(home_cc_network_status_timer_cb, 300, NULL);
+#endif
     home_cc_sync_from_device();
     home_cc_show_panel(false);
     home_cc_clear_event_bubble_subtree(g_home_cc.scrim);
@@ -1199,10 +1238,12 @@ void ui_ControlCenter_init(lv_obj_t * screen)
 void ui_ControlCenter_deinit(void)
 {
     home_cc_stop_panel_anim();
+#ifndef CONFIG_BAJI_WIFI_ONLY
     if(g_home_cc.network_status_timer) {
         lv_timer_delete(g_home_cc.network_status_timer);
         g_home_cc.network_status_timer = NULL;
     }
+#endif
     home_cc_reset_context();
 }
 

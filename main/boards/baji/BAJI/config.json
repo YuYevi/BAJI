@@ -5,6 +5,7 @@
         {
             "name": "BAJI",
             "sdkconfig_append": [
+                "CONFIG_BAJI_WIFI_ONLY=n",
                 "CONFIG_USE_HOTSPOT_WIFI_PROVISIONING=n",
                 "CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING=y",
                 "CONFIG_BT_ENABLED=y",
@@ -14,7 +15,37 @@
                 "CONFIG_BT_BLE_50_FEATURES_SUPPORTED=n",
                 "CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=y",
                 "CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY=y",
-                "CONFIG_MBEDTLS_DHM_C=y"
+                "CONFIG_MBEDTLS_DHM_C=y",
+                "CONFIG_SR_MN_CN_MULTINET7_QUANT=y",
+                "CONFIG_LV_USE_QRCODE=y",
+                "CONFIG_LV_FONT_MONTSERRAT_16=y",
+                "CONFIG_LV_FONT_MONTSERRAT_24=y",
+                "CONFIG_LV_FONT_MONTSERRAT_28=y",
+                "CONFIG_LV_FONT_MONTSERRAT_32=y",
+                "CONFIG_LV_FONT_MONTSERRAT_44=y"
+            ]
+        },
+        {
+            "name": "BAJI-WIFI",
+            "sdkconfig_append": [
+                "CONFIG_BAJI_WIFI_ONLY=y",
+                "CONFIG_USE_HOTSPOT_WIFI_PROVISIONING=n",
+                "CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING=y",
+                "CONFIG_BT_ENABLED=y",
+                "CONFIG_BT_BLUEDROID_ENABLED=y",
+                "CONFIG_BT_BLE_BLUFI_ENABLE=y",
+                "CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y",
+                "CONFIG_BT_BLE_50_FEATURES_SUPPORTED=n",
+                "CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=y",
+                "CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY=y",
+                "CONFIG_MBEDTLS_DHM_C=y",
+                "CONFIG_SR_MN_CN_MULTINET7_QUANT=y",
+                "CONFIG_LV_USE_QRCODE=y",
+                "CONFIG_LV_FONT_MONTSERRAT_16=y",
+                "CONFIG_LV_FONT_MONTSERRAT_24=y",
+                "CONFIG_LV_FONT_MONTSERRAT_28=y",
+                "CONFIG_LV_FONT_MONTSERRAT_32=y",
+                "CONFIG_LV_FONT_MONTSERRAT_44=y"
             ]
         }
     ]

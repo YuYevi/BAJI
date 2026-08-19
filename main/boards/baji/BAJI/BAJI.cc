@@ -43,12 +43,16 @@
 #include "config.h"
 #include "settings.h"
 #include "application.h"
+#ifndef CONFIG_BAJI_WIFI_ONLY
 #include "mqtt_control.h"
+#endif
 #include "system_reset.h"
 #include "wifi_board.h"
 #include "codecs/es8311_audio_codec.h"
 #include "display/lcd_display.h"
+#ifndef CONFIG_BAJI_WIFI_ONLY
 #include "boards/common/ml307_board.h"
+#endif
 #include "assets/lang_config.h"
 #include "i2c_device.h"
 #include "esp_io_expander_tca9554.h"
@@ -502,14 +506,19 @@ static void Waveshare185EnsureIoExpander(void)
     ESP_ERROR_CHECK(esp_io_expander_new_i2c_tca9554(g_baji185_i2c_bus, TCA9554_I2C_ADDR, &g_baji185_io_expander));
 
     const uint32_t in_pins = BAJI185_IOX_PIN_MASK_VOL_DOWN | BAJI185_IOX_PIN_MASK_VOL_UP;
-    const uint32_t out_pins = BAJI185_IOX_PIN_MASK_4G_PWRON | BAJI185_IOX_PIN_MASK_4G_RST |
-                              BAJI185_IOX_PIN_MASK_PA | BAJI185_IOX_PIN_MASK_RUN_LED | BAJI185_IOX_PIN_MASK_LCD_RST;
+    uint32_t out_pins = BAJI185_IOX_PIN_MASK_PA | BAJI185_IOX_PIN_MASK_RUN_LED |
+                        BAJI185_IOX_PIN_MASK_LCD_RST;
+#ifndef CONFIG_BAJI_WIFI_ONLY
+    out_pins |= BAJI185_IOX_PIN_MASK_4G_PWRON | BAJI185_IOX_PIN_MASK_4G_RST;
+#endif
 
     ESP_ERROR_CHECK(esp_io_expander_set_dir(g_baji185_io_expander, in_pins, IO_EXPANDER_INPUT));
     ESP_ERROR_CHECK(esp_io_expander_set_dir(g_baji185_io_expander, out_pins, IO_EXPANDER_OUTPUT));
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
     ESP_ERROR_CHECK(esp_io_expander_set_level(g_baji185_io_expander, BAJI185_IOX_PIN_MASK_4G_PWRON, 0));
     ESP_ERROR_CHECK(esp_io_expander_set_level(g_baji185_io_expander, BAJI185_IOX_PIN_MASK_4G_RST, 1));
+#endif
 
 #ifdef AUDIO_CODEC_PA_INVERTED
     ESP_ERROR_CHECK(esp_io_expander_set_level(g_baji185_io_expander, BAJI185_IOX_PIN_MASK_PA, AUDIO_CODEC_PA_INVERTED ? 1 : 0));
@@ -755,17 +764,20 @@ private:
     bool recovery_marked_stable_ = false;
     std::atomic<bool> application_ready_{false};
     static CustomBoard* instance_;               ///< 单例实例
+#ifndef CONFIG_BAJI_WIFI_ONLY
     std::atomic<bool> pending_4g_switch_{false}; ///< 待处理的4G切换请求
     std::atomic<int> pending_switch_target_{-1};
     std::atomic<uint32_t> pending_switch_generation_{0};
     std::atomic<bool> fourg_power_on_{false};    ///< 4G模块电源状态
     esp_timer_handle_t fourg_confirm_timer_ = nullptr; ///< 4G切换确认定时器
+#endif
     bool auto_power_restore_pending_ = false;    ///< 是否记录了开启前的亮度/音量
     uint8_t auto_power_saved_brightness_ = 100;  ///< 开启前亮度
     uint8_t auto_power_saved_volume_ = 100;      ///< 开启前音量
     std::string factory_ota_role_;
     std::string factory_ota_network_version_;
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
     /** 网络模式枚举 */
     enum class NetMode {
         WIFI,   ///< WiFi模式
@@ -797,7 +809,17 @@ private:
     TaskHandle_t wifi_reprovision_task_ = nullptr; ///< 重新配网任务句柄
     TaskHandle_t fourg_recovery_task_ = nullptr; ///< 4G失败后回退WiFi任务句柄
     std::atomic<NetFlowState> net_flow_state_{NetFlowState::Idle}; ///< 网络流程保护状态
+#else
+    std::atomic<BoardNetworkMode> active_network_mode_{BoardNetworkMode::UNSUPPORTED};
+    std::atomic<BoardNetworkMode> target_network_mode_{BoardNetworkMode::WIFI};
+    std::atomic<BoardNetworkPhase> network_phase_{BoardNetworkPhase::OFFLINE};
+    std::atomic<bool> network_link_up_{false};
+    std::atomic<uint32_t> network_generation_{0};
+    NetworkEventCallback net_cb_;
+    mutable std::mutex net_cb_mutex_;
+#endif
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
     /**
      * @brief 4G切换确认定时器回调
      * 
@@ -808,6 +830,7 @@ private:
         self->pending_4g_switch_ = false;
         self->pending_switch_target_.store(-1);
     }
+#endif
 
 #if CONFIG_ESP_TASK_WDT_EN
     static void LvglWatchdogTimerCb(lv_timer_t* timer) {
@@ -851,6 +874,7 @@ private:
     }
 #endif
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
     NetFlowState GetNetFlowState() const {
         return net_flow_state_.load();
     }
@@ -933,6 +957,65 @@ private:
                wifi_reprovision_task_ != nullptr ||
                fourg_recovery_task_ != nullptr;
     }
+#else
+    void DispatchNetworkEvent(NetworkEvent event, const std::string& data) {
+        NetworkEventCallback callback;
+        {
+            std::lock_guard<std::mutex> lock(net_cb_mutex_);
+            callback = net_cb_;
+        }
+        if (callback) {
+            callback(event, data);
+        }
+    }
+
+    void HandleWifiOnlyNetworkEvent(NetworkEvent event, const std::string& data) {
+        switch (event) {
+            case NetworkEvent::Scanning:
+            case NetworkEvent::Connecting:
+                active_network_mode_.store(BoardNetworkMode::UNSUPPORTED);
+                target_network_mode_.store(BoardNetworkMode::WIFI);
+                network_link_up_.store(false);
+                network_phase_.store(BoardNetworkPhase::CONNECTING);
+                break;
+            case NetworkEvent::Connected:
+                active_network_mode_.store(BoardNetworkMode::WIFI);
+                target_network_mode_.store(BoardNetworkMode::WIFI);
+                network_link_up_.store(true);
+                network_phase_.store(BoardNetworkPhase::ONLINE);
+                break;
+            case NetworkEvent::Disconnected:
+                active_network_mode_.store(BoardNetworkMode::UNSUPPORTED);
+                network_link_up_.store(false);
+                network_phase_.store(BoardNetworkPhase::OFFLINE);
+                break;
+            case NetworkEvent::WifiConfigModeEnter:
+                active_network_mode_.store(BoardNetworkMode::UNSUPPORTED);
+                target_network_mode_.store(BoardNetworkMode::WIFI);
+                network_link_up_.store(false);
+                network_phase_.store(BoardNetworkPhase::PROVISIONING);
+                break;
+            case NetworkEvent::WifiConfigModeExit:
+                active_network_mode_.store(BoardNetworkMode::UNSUPPORTED);
+                target_network_mode_.store(BoardNetworkMode::WIFI);
+                network_link_up_.store(false);
+                network_phase_.store(data == "stopped" ? BoardNetworkPhase::OFFLINE
+                                                         : BoardNetworkPhase::CONNECTING);
+                break;
+            default:
+                break;
+        }
+
+        DispatchNetworkEvent(event, data);
+    }
+
+    void BindWifiOnlyNetworkCallback() {
+        WifiBoard::SetNetworkEventCallback(
+            [this](NetworkEvent event, const std::string& data) {
+                HandleWifiOnlyNetworkEvent(event, data);
+            });
+    }
+#endif
 
     static uint8_t ClampBrightnessPercent(int value) {
         if (value <= 0) {
@@ -1040,6 +1123,7 @@ private:
         }
     }
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
     BoardNetworkMode GetDisplayedNetworkMode() const {
         switch (GetNetFlowState()) {
             case NetFlowState::SwitchingToWifi:
@@ -1819,6 +1903,7 @@ private:
         }
         return true;
     }
+#endif
 
     /**
      * @brief 根据音量等级获取音量图标
@@ -1850,6 +1935,27 @@ private:
     }
 
     void TriggerWifiReprovision() {
+#ifdef CONFIG_BAJI_WIFI_ONLY
+        if (IsManualWifiConfigMode() && ExitManualWifiConfigMode()) {
+            GetDisplay()->ShowNotification("已退出配网模式", 2000);
+            return;
+        }
+        if (IsInWifiConfigMode()) {
+            EnterWifiConfigMode();
+            return;
+        }
+        if (IsApplicationBusyForNetOp()) {
+            ShowApplicationBusyNotification();
+            return;
+        }
+
+        network_generation_.fetch_add(1);
+        active_network_mode_.store(BoardNetworkMode::UNSUPPORTED);
+        target_network_mode_.store(BoardNetworkMode::WIFI);
+        network_link_up_.store(false);
+        network_phase_.store(BoardNetworkPhase::PROVISIONING);
+        EnterWifiConfigMode();
+#else
         if (IsInWifiConfigMode() && !IsManualWifiConfigMode()) {
             EnterWifiConfigMode();
         }
@@ -1961,6 +2067,7 @@ private:
             MarkNetworkOffline();
             SetNetFlowState(NetFlowState::Failed);
         }
+#endif
     }
 
     /**
@@ -2104,6 +2211,7 @@ private:
         iot_button_register_cb(vol_up_handle_, BUTTON_SINGLE_CLICK, nullptr, [](void* button_handle, void* usr_data) {
             auto self = static_cast<CustomBoard*>(usr_data);
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
             if (self->pending_4g_switch_) {
                 self->pending_4g_switch_ = false;
                 if (self->fourg_confirm_timer_) {
@@ -2123,6 +2231,7 @@ private:
                 }
                 return;
             }
+#endif
 
             auto* codec = self->GetAudioCodec();
             int volume = codec->output_volume() + 10;
@@ -2135,6 +2244,7 @@ private:
             self->ShowVolumeOnDisplay(volume);
         }, this);
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
         iot_button_register_cb(vol_up_handle_, BUTTON_LONG_PRESS_START, nullptr, [](void* button_handle, void* usr_data) {
             auto self = static_cast<CustomBoard*>(usr_data);
             const BoardNetworkStatus status = self->GetNetworkStatus();
@@ -2175,6 +2285,7 @@ private:
                 target_mode == BoardNetworkMode::CELLULAR ? "切换4G？短按音量+确认" : "切换WiFi？短按音量+确认", 2000);
         }, this);
 
+#endif
         iot_button_register_cb(vol_down_handle_, BUTTON_SINGLE_CLICK, nullptr, [](void* button_handle, void* usr_data) {
             auto self = static_cast<CustomBoard*>(usr_data);
             auto* codec = self->GetAudioCodec();
@@ -2205,16 +2316,20 @@ public:
         factory_ota_role_ = factory_identity.role;
         factory_ota_network_version_ = factory_identity.network_version;
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
         Settings settings("network", true);
         prefer_4g_on_boot_ = (settings.GetInt("type", 1) == 1);
+#endif
 
         InitializePowerManager();
         InitializePowerSaveTimer();
         InitializeI2c();
 
+#ifndef CONFIG_BAJI_WIFI_ONLY
         Set4GPwrKeyLevel(0);
         gpio_set_direction(ML307_MOD_RST_GPIO_VIRTUAL, GPIO_MODE_OUTPUT);
         gpio_set_level(ML307_MOD_RST_GPIO_VIRTUAL, 1);
+#endif
         GetBacklight()->SetBrightness(0);
 
         display_ = baji_185_create_lcd_display();
@@ -2364,6 +2479,7 @@ public:
     /**
      * @brief 启动网络
      */
+#ifndef CONFIG_BAJI_WIFI_ONLY
     void StartNetwork() override {
         BeginNetworkGeneration();
         MarkNetworkOffline();
@@ -2470,6 +2586,61 @@ public:
         NetMode target = (mode == BoardNetworkMode::CELLULAR) ? NetMode::ML307 : NetMode::WIFI;
         return RequestNetworkSwitch(target, false, true);
     }
+#else
+    void StartNetwork() override {
+        network_generation_.fetch_add(1);
+        active_network_mode_.store(BoardNetworkMode::UNSUPPORTED);
+        target_network_mode_.store(BoardNetworkMode::WIFI);
+        network_link_up_.store(false);
+        network_phase_.store(BoardNetworkPhase::CONNECTING);
+        BindWifiOnlyNetworkCallback();
+        SetWifiAutoReconnectEnabled(true);
+        WifiBoard::StartNetwork();
+    }
+
+    void SetNetworkEventCallback(NetworkEventCallback callback) override {
+        {
+            std::lock_guard<std::mutex> lock(net_cb_mutex_);
+            net_cb_ = std::move(callback);
+        }
+        BindWifiOnlyNetworkCallback();
+    }
+
+    NetworkInterface* GetNetwork() override {
+        if (!network_link_up_.load() ||
+            network_phase_.load() != BoardNetworkPhase::ONLINE ||
+            active_network_mode_.load() != BoardNetworkMode::WIFI) {
+            return nullptr;
+        }
+        return WifiBoard::GetNetwork();
+    }
+
+    const char* GetNetworkStateIcon() override {
+        if (!network_link_up_.load() ||
+            network_phase_.load() != BoardNetworkPhase::ONLINE) {
+            return FONT_AWESOME_WIFI_SLASH;
+        }
+        return WifiBoard::GetNetworkStateIcon();
+    }
+
+    BoardNetworkMode GetActiveNetworkMode() override {
+        return active_network_mode_.load();
+    }
+
+    BoardNetworkStatus GetNetworkStatus() override {
+        BoardNetworkStatus status;
+        status.active_mode = active_network_mode_.load();
+        status.target_mode = target_network_mode_.load();
+        status.phase = network_phase_.load();
+        status.link_up = network_link_up_.load();
+        status.generation = network_generation_.load();
+        return status;
+    }
+
+    bool SwitchActiveNetworkMode(BoardNetworkMode mode) override {
+        return mode == BoardNetworkMode::WIFI;
+    }
+#endif
 };
 
 DECLARE_BOARD(CustomBoard);

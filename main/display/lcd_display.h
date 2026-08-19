@@ -15,7 +15,9 @@
 #define PREVIEW_IMAGE_DURATION_MS 5000
 
 class LvglTheme;
+#ifndef CONFIG_BAJI_WIFI_ONLY
 enum class BoardNetworkMode;
+#endif
 
 class LcdDisplay : public LvglDisplay {
 protected:
@@ -42,25 +44,33 @@ protected:
     std::unique_ptr<LvglGif> gif_controller_ = nullptr;
     lv_obj_t* emoji_box_ = nullptr;
     lv_obj_t* chat_message_label_ = nullptr;
+#ifndef CONFIG_BAJI_WIFI_ONLY
     lv_obj_t* ota_network_switch_container_ = nullptr;
     lv_obj_t* ota_wifi_switch_btn_ = nullptr;
     lv_obj_t* ota_wifi_switch_label_ = nullptr;
     lv_obj_t* ota_4g_switch_btn_ = nullptr;
     lv_obj_t* ota_4g_switch_label_ = nullptr;
+#endif
     esp_timer_handle_t preview_timer_ = nullptr;
     std::unique_ptr<LvglImage> preview_image_cached_ = nullptr;
     bool hide_subtitle_ = false;
     bool smart_watch_ui_active_ = false;
+#ifndef CONFIG_BAJI_WIFI_ONLY
     bool wifi_mode_switch_pending_ = false;
     bool ota_network_switch_pending_ = false;
+#endif
 
     void InitializeLcdThemes();
     void ApplyContainerBackground(LvglTheme* theme);
     void InitializeTouch();  // 触摸初始化函数
+#ifndef CONFIG_BAJI_WIFI_ONLY
     void CreateNetworkSwitchButtons(lv_obj_t* screen, const lv_font_t* text_font,
                                     LvglTheme* lvgl_theme);
     void UpdateWifiModeSwitchButton();
     void OnOtaNetworkSwitchButtonClicked(BoardNetworkMode target);
+#else
+    void UpdateWifiModeSwitchButton() {}
+#endif
     virtual bool Lock(int timeout_ms = 0) override;
     virtual void Unlock() override;
 
