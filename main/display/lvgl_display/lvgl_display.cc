@@ -38,19 +38,46 @@ void SetActivationWaitingText(lv_obj_t* label, uint8_t dot_count) {
 }
 
 const char* GetStartupNetworkModeIcon(Board& board, Application& app, const char* fallback_icon) {
-    if (app.GetDeviceState() != kDeviceStateStarting) {
+    // GetNetworkStateIcon() is the authoritative view of the backend.  Do
+    // not replace a valid signal icon merely because activation is still in
+    // progress; doing so left the status bar stuck on the "offline" icon
+    // while the device already had a usable link.
+    (void)app;
+    const BoardNetworkStatus status = board.GetNetworkStatus();
+    const bool online = status.phase == BoardNetworkPhase::ONLINE && status.link_up;
+    if (online && fallback_icon != nullptr && fallback_icon[0] != '\0') {
         return fallback_icon;
     }
 
-    switch (board.GetActiveNetworkMode()) {
-        case BoardNetworkMode::CELLULAR:
-            return FONT_AWESOME_SIGNAL_OFF;
-        case BoardNetworkMode::WIFI:
-            return FONT_AWESOME_WIFI_SLASH;
-        case BoardNetworkMode::UNSUPPORTED:
-        default:
-            return fallback_icon;
+    const BoardNetworkMode mode = status.target_mode != BoardNetworkMode::UNSUPPORTED
+        ? status.target_mode
+        : status.active_mode;
+    if (mode == BoardNetworkMode::UNSUPPORTED) {
+        return fallback_icon;
     }
+    return mode == BoardNetworkMode::CELLULAR
+        ? FONT_AWESOME_SIGNAL_OFF
+        : FONT_AWESOME_WIFI_SLASH;
+}
+
+bool IsCellularSignalIcon(const char* icon) {
+    if (icon == nullptr) {
+        return false;
+    }
+    return strcmp(icon, FONT_AWESOME_SIGNAL_STRONG) == 0 ||
+           strcmp(icon, FONT_AWESOME_SIGNAL_GOOD) == 0 ||
+           strcmp(icon, FONT_AWESOME_SIGNAL_FAIR) == 0 ||
+           strcmp(icon, FONT_AWESOME_SIGNAL_WEAK) == 0;
+}
+
+void SetNetworkLabelIcon(lv_obj_t* label, const char* icon) {
+    if (label == nullptr) {
+        return;
+    }
+    lv_label_set_text(label, icon);
+    // Font Awesome's cellular glyphs have a lower visual baseline than the
+    // Wi-Fi glyphs in both status-bar fonts.
+    lv_obj_set_style_translate_y(label, IsCellularSignalIcon(icon) ? -1 : 0, 0);
 }
 }  // namespace
 
@@ -324,8 +351,8 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
                 if (network_label_ != nullptr) {
                     if (network_icon_ != normalized_icon) {
                         network_icon_ = normalized_icon;
-                        lv_label_set_text(network_label_, network_icon_);
                     }
+                    SetNetworkLabelIcon(network_label_, network_icon_);
                     lv_obj_remove_flag(network_label_, LV_OBJ_FLAG_HIDDEN);
                 }
             } else
@@ -333,10 +360,12 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
             {
                 static int seconds_counter = 0;
                 if (update_all || seconds_counter++ % 10 == 0) {
-                    if (network_label_ != nullptr && icon != nullptr && network_icon_ != icon) {
+                    const char* normalized_icon =
+                        (icon != nullptr && icon[0] != '\0') ? icon : FONT_AWESOME_WIFI_SLASH;
+                    if (network_label_ != nullptr && network_icon_ != normalized_icon) {
                         DisplayLockGuard lock(this);
-                        network_icon_ = icon;
-                        lv_label_set_text(network_label_, network_icon_);
+                        network_icon_ = normalized_icon;
+                        SetNetworkLabelIcon(network_label_, network_icon_);
                     }
                 }
             }

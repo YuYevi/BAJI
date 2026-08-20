@@ -1139,6 +1139,14 @@ private:
         }
     }
 
+    // During a handoff active_network_mode_ is intentionally cleared until
+    // the destination backend reports Connected.  The status icon still
+    // needs to identify that destination while it is offline, otherwise a
+    // 4G connection attempt is rendered as a Wi-Fi slash icon.
+    BoardNetworkMode GetNetworkIconMode() const {
+        return GetDisplayedNetworkMode();
+    }
+
     void ShowNetFlowBusyNotification(const char* action) {
         const char* message = nullptr;
         switch (GetNetFlowState()) {
@@ -2550,7 +2558,7 @@ public:
      */
     const char* GetNetworkStateIcon() override {
         if (GetNetFlowState() != NetFlowState::Idle || !network_link_up_.load()) {
-            return active_network_mode_.load() == BoardNetworkMode::CELLULAR
+            return GetNetworkIconMode() == BoardNetworkMode::CELLULAR
                 ? FONT_AWESOME_SIGNAL_OFF
                 : FONT_AWESOME_WIFI_SLASH;
         }

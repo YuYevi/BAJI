@@ -3,6 +3,8 @@
 #include "font_awesome.h"
 #include "ui_runtime.h"
 
+#include <string.h>
+
 extern const lv_font_t font_awesome_14_1;
 
 static const char * g_network_icon = FONT_AWESOME_WIFI;
@@ -236,6 +238,16 @@ static const char * normalize_network_icon(const char * icon)
     return icon;
 }
 
+static bool is_cellular_strength_icon(const char * icon)
+{
+    if(!icon) return false;
+
+    return strcmp(icon, FONT_AWESOME_SIGNAL_STRONG) == 0 ||
+           strcmp(icon, FONT_AWESOME_SIGNAL_GOOD) == 0 ||
+           strcmp(icon, FONT_AWESOME_SIGNAL_FAIR) == 0 ||
+           strcmp(icon, FONT_AWESOME_SIGNAL_WEAK) == 0;
+}
+
 static const char * battery_symbol_for(uint8_t percent, bool charging)
 {
     (void)charging;
@@ -249,7 +261,12 @@ static const char * battery_symbol_for(uint8_t percent, bool charging)
 static void status_bar_apply(app_status_bar_t * bar)
 {
     if(!bar || !bar->cont) return;
-    lv_label_set_text(bar->wifi, normalize_network_icon(g_network_icon));
+    const char * network_icon = normalize_network_icon(g_network_icon);
+    lv_label_set_text(bar->wifi, network_icon);
+    // Cellular strength glyphs sit one pixel below the Wi-Fi glyph in the
+    // status-bar font. Keep the online network indicators centered; the
+    // slash/off glyphs already share the Wi-Fi slash baseline.
+    lv_obj_set_style_translate_y(bar->wifi, is_cellular_strength_icon(network_icon) ? -1 : 0, 0);
     lv_label_set_text(bar->battery, battery_symbol_for(g_battery_percent, g_battery_charging));
     
     if(g_battery_charging) {

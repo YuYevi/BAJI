@@ -52,12 +52,29 @@ bool ShouldEnterSmartWatchAiChat(DeviceState state) {
 }
 
 const char* GetInitialNetworkModeIcon(Board& board) {
+    const BoardNetworkStatus status = board.GetNetworkStatus();
+    const bool online = status.phase == BoardNetworkPhase::ONLINE && status.link_up;
+    if (!online) {
+        const BoardNetworkMode mode = status.target_mode != BoardNetworkMode::UNSUPPORTED
+            ? status.target_mode
+            : status.active_mode;
+        if (mode == BoardNetworkMode::CELLULAR) {
+            return FONT_AWESOME_SIGNAL_OFF;
+        }
+        if (mode == BoardNetworkMode::WIFI) {
+            return FONT_AWESOME_WIFI_SLASH;
+        }
+    }
+
     const char* icon = board.GetNetworkStateIcon();
     if (icon != nullptr && icon[0] != '\0') {
         return icon;
     }
 
-    switch (board.GetActiveNetworkMode()) {
+    const BoardNetworkMode mode = status.target_mode != BoardNetworkMode::UNSUPPORTED
+        ? status.target_mode
+        : status.active_mode;
+    switch (mode) {
         case BoardNetworkMode::CELLULAR:
             return FONT_AWESOME_SIGNAL_OFF;
         case BoardNetworkMode::WIFI:
@@ -879,7 +896,7 @@ void LcdDisplay::UpdateStatusBar(bool update_all) {
     bool charging = false;
     bool discharging = false;
     bool have_battery = board.GetBatteryLevel(battery_level, charging, discharging);
-    const char* icon = board.GetNetworkStateIcon();
+    const char* icon = GetInitialNetworkModeIcon(board);
     DisplayLockGuard lock(this);
     smartwatch_ui_runtime_set_network_icon(icon);
     if (have_battery) {
