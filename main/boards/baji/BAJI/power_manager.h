@@ -18,6 +18,7 @@
 #include "power_latch.h"
 #include "power_recovery_rtc.h"
 #include "abnormal_reporter.h"
+#include "mqtt_control.h"
 #include <esp_log.h>
 #include <esp_sleep.h>
 #include <esp_system.h>
@@ -726,8 +727,14 @@ private:
         }
 #endif
 
-        PersistBatteryState(true);
         AbnormalReporter::MarkExpectedReset("poweroff");
+
+        // Publish the retained offline status before cutting board power. The
+        // independent force-cut path intentionally does not enter this
+        // blocking sequence and relies on MQTT Last Will/timeout instead.
+        MqttControl::GetInstance().Stop();
+
+        PersistBatteryState(true);
         EnterPowerOff();
     }
 
