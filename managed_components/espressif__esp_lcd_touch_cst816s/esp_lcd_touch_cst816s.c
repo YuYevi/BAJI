@@ -124,10 +124,22 @@ static esp_err_t esp_lcd_touch_cst816s_read_data(esp_lcd_touch_handle_t tp)
     for (int i = 0; i < point.num; i++) {
         tp->data.coords[i].x = point.x_h << 8 | point.x_l;
         tp->data.coords[i].y = point.y_h << 8 | point.y_l;
-        tp->data.coords[i].y= 1.05*tp->data.coords[i].y; //360/343*tp->data.coords[i].y;
-        if(tp->data.coords[i].y>360)
-        {
-            tp->data.coords[i].y=360;
+
+        /*
+         * CST816S reports panel coordinates directly.  Do not apply a
+         * board-specific scale here: the common touch layer performs the
+         * configured mirror/swap operation after this callback.  Scaling Y
+         * by 1.05 caused an increasing position error and made touches near
+         * the lower edge land above their visual target.
+         *
+         * Keep the samples inside the configured pixel range so an endpoint
+         * value cannot underflow when the common layer mirrors it.
+         */
+        if (tp->data.coords[i].x > tp->config.x_max) {
+            tp->data.coords[i].x = tp->config.x_max;
+        }
+        if (tp->data.coords[i].y > tp->config.y_max) {
+            tp->data.coords[i].y = tp->config.y_max;
         }
     }
     portEXIT_CRITICAL(&tp->data.lock);

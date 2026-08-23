@@ -5,6 +5,10 @@
 #include "board.h"
 #include "settings.h"
 
+#include <atomic>
+
+static std::atomic<uint32_t> g_alarm_generation{1};
+
 static uint8_t clamp_percent(int32_t value, uint8_t fallback)
 {
     if (value < 0) {
@@ -208,18 +212,25 @@ extern "C" bool app_device_get_alarm_item(uint8_t idx, uint8_t * hour, uint8_t *
     return true;
 }
 
+extern "C" uint32_t app_device_get_alarm_generation(void)
+{
+    return g_alarm_generation.load(std::memory_order_acquire);
+}
+
 extern "C" void app_device_set_alarm_item(uint8_t idx, uint8_t hour, uint8_t minute, bool enabled)
 {
     Settings settings("alarm", true);
     settings.SetInt(alarm_key("h", idx), hour > 23 ? 0 : hour);
     settings.SetInt(alarm_key("m", idx), minute > 59 ? 0 : minute);
     settings.SetBool(alarm_key("on", idx), enabled);
+    g_alarm_generation.fetch_add(1, std::memory_order_release);
 }
 
 extern "C" void app_device_set_alarm_count(uint8_t count)
 {
     Settings settings("alarm", true);
     settings.SetInt("count", count);
+    g_alarm_generation.fetch_add(1, std::memory_order_release);
 }
 
 extern "C" void app_device_reboot(void)

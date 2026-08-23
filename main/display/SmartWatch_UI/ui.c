@@ -27,6 +27,7 @@ void ui_init(void)
 
     /* 初始化状态叠加层和各个界面资源 */
     app_status_overlay_init();
+    ui_AlarmRuntime_init();
     ui_HomeScreen_init();
     ui_StandbyScreen_init();
     ui_AIChatScreen_init();
@@ -58,6 +59,7 @@ void ui_destroy(void)
     ui_WallpaperScreen_deinit();
     ui_EventsScreen_deinit();
     ui_AlarmScreen_deinit();
+    ui_AlarmRuntime_deinit();
     ui_LightStickScreen_deinit();
 
     /* 释放壁纸资源并注销状态叠加层 */

@@ -23,17 +23,6 @@ extern const lv_image_dsc_t cheering_light;
 /* 主页屏幕根对象，由外部导航系统持有和切换。 */
 lv_obj_t * ui_HomeScreen;
 
-/* 统一保存页面运行时状态，避免散落的静态指针过多。 */
-typedef struct {
-    lv_obj_t * time_hour;
-    lv_obj_t * time_colon;
-    lv_obj_t * time_minute;
-    lv_obj_t * date_label;
-    lv_obj_t * hero_button;
-    lv_obj_t * app_grid;
-    lv_timer_t * clock_timer;
-} home_view_t;
-
 /* 应用入口的视觉和导航配置。 */
 typedef struct {
     int16_t x;
@@ -49,12 +38,15 @@ typedef struct {
     lv_obj_t ** target_screen;
 } home_app_config_t;
 
-static home_view_t g_home_view;
-static lv_grad_dsc_t g_home_hero_grad;
-#define HOME_APP_COUNT ((uint8_t)(sizeof(kHomeApps) / sizeof(kHomeApps[0])))
-#define HOME_HERO_PRESSED_INSET (-5)
-#define HOME_APP_PRESSED_INSET (-4)
-static lv_grad_dsc_t g_home_app_icon_grads[4];
+typedef struct {
+    lv_obj_t * root;
+    lv_obj_t * plate;
+    lv_obj_t * content;
+} home_pressable_t;
+
+#define HOME_HERO_PRESSED_SCALE 248
+#define HOME_APP_PRESSED_SCALE  248
+#define HOME_PRESSABLE_EXT_DRAW_SIZE 6
 
 static const char * const kHomeWeekDays[] = {
     "星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"
@@ -67,12 +59,24 @@ static const home_app_config_t kHomeApps[] = {
     { 80, 69, 118, 63, 0xe879f9, 0xf0abfc, 0x86198f, 0xf0abfc, &cheering_light, "应援灯", &ui_LightStickScreen },
 };
 
-/* 为文字透明度动画提供统一入口。 */
-static void home_set_text_opa(void * obj, int32_t value)
-{
-    if(!obj) return;
-    lv_obj_set_style_text_opa((lv_obj_t *)obj, (lv_opa_t)value, 0);
-}
+#define HOME_APP_COUNT (sizeof(kHomeApps) / sizeof(kHomeApps[0]))
+
+/* 统一保存页面运行时状态，避免散落的静态指针过多。 */
+typedef struct {
+    lv_obj_t * time_hour;
+    lv_obj_t * time_colon;
+    lv_obj_t * time_minute;
+    lv_obj_t * date_label;
+    home_pressable_t hero;
+    home_pressable_t apps[HOME_APP_COUNT];
+    lv_timer_t * clock_timer;
+    int32_t displayed_minute_key;
+    int32_t displayed_date_key;
+    bool colon_bright;
+} home_view_t;
+
+static home_view_t g_home_view;
+static lv_grad_dsc_t g_home_app_icon_grads[HOME_APP_COUNT];
 
 /* 为阴影透明度动画提供统一入口。 */
 static void home_set_shadow_opa(void * obj, int32_t value)
@@ -81,39 +85,26 @@ static void home_set_shadow_opa(void * obj, int32_t value)
     lv_obj_set_style_shadow_opa((lv_obj_t *)obj, (lv_opa_t)value, 0);
 }
 
-/* 为背景透明度动画提供统一入口。 */
-static void home_set_bg_opa(void * obj, int32_t value)
-{
-    if(!obj) return;
-    lv_obj_set_style_bg_opa((lv_obj_t *)obj, (lv_opa_t)value, 0);
-}
-
-/* Use transform size instead of transform scale so child text/icons are not resampled. */
-static int32_t home_press_inset_height(int32_t inset)
-{
-    return inset < 0 ? inset / 2 : 0;
-}
-
-static void home_set_press_inset(void * obj, int32_t value)
+static void home_set_press_scale(void * obj, int32_t value)
 {
     if(!obj) return;
 
-    lv_obj_set_style_transform_width((lv_obj_t *)obj, value, 0);
-    lv_obj_set_style_transform_height((lv_obj_t *)obj, home_press_inset_height(value), 0);
+    /* Only background plates are scaled. Text and icons stay at native size. */
+    lv_obj_set_style_transform_scale((lv_obj_t *)obj, value, 0);
 }
 
-static int32_t home_get_press_inset(lv_obj_t * obj)
+static int32_t home_get_press_scale(lv_obj_t * obj)
 {
-    if(!obj) return 0;
-    return lv_obj_get_style_transform_width(obj, LV_PART_MAIN);
+    if(!obj) return LV_SCALE_NONE;
+    return lv_obj_get_style_transform_scale_x_safe(obj, LV_PART_MAIN);
 }
 
-static void home_reset_press_inset(lv_obj_t * obj)
+static void home_reset_press_scale(lv_obj_t * obj)
 {
     if(!obj) return;
 
-    lv_anim_del(obj, (lv_anim_exec_xcb_t)home_set_press_inset);
-    home_set_press_inset(obj, 0);
+    lv_anim_del(obj, (lv_anim_exec_xcb_t)home_set_press_scale);
+    home_set_press_scale(obj, LV_SCALE_NONE);
 }
 
 static lv_opa_t home_hero_bg_opa_idle(void)
@@ -121,25 +112,14 @@ static lv_opa_t home_hero_bg_opa_idle(void)
     return (lv_opa_t)(LV_OPA_COVER * 94 / 100);
 }
 
-static lv_opa_t home_hero_bg_opa_pressed(void)
-{
-    return (lv_opa_t)(LV_OPA_COVER * 86 / 100);
-}
-
-static lv_opa_t home_get_bg_opa(lv_obj_t * obj)
-{
-    if(!obj) return home_hero_bg_opa_idle();
-    return lv_obj_get_style_bg_opa(obj, LV_PART_MAIN);
-}
-
 static lv_opa_t home_app_card_shadow_opa_idle(void)
 {
-    return (lv_opa_t)(LV_OPA_COVER * 32 / 100);
+    return (lv_opa_t)(LV_OPA_COVER * 24 / 100);
 }
 
 static lv_opa_t home_app_card_shadow_opa_pressed(void)
 {
-    return (lv_opa_t)(LV_OPA_COVER * 18 / 100);
+    return (lv_opa_t)(LV_OPA_COVER * 14 / 100);
 }
 
 static lv_opa_t home_get_shadow_opa(lv_obj_t * obj)
@@ -148,28 +128,21 @@ static lv_opa_t home_get_shadow_opa(lv_obj_t * obj)
     return lv_obj_get_style_shadow_opa(obj, LV_PART_MAIN);
 }
 
-static void home_reset_app_card_visual(lv_obj_t * card)
+static void home_reset_app_plate_visual(lv_obj_t * plate)
 {
-    if(!card) return;
+    if(!plate) return;
 
-    home_reset_press_inset(card);
-    lv_anim_del(card, (lv_anim_exec_xcb_t)home_set_shadow_opa);
-    lv_obj_set_style_shadow_opa(card, home_app_card_shadow_opa_idle(), 0);
+    home_reset_press_scale(plate);
+    lv_anim_del(plate, (lv_anim_exec_xcb_t)home_set_shadow_opa);
+    lv_obj_set_style_shadow_opa(plate, home_app_card_shadow_opa_idle(), 0);
 }
 
-static void home_reset_hero_button_visual(lv_obj_t * button)
+static void home_reset_hero_plate_visual(lv_obj_t * plate)
 {
-    if(!button) return;
+    if(!plate) return;
 
-    home_reset_press_inset(button);
-    lv_anim_del(button, (lv_anim_exec_xcb_t)home_set_bg_opa);
-    lv_obj_set_style_bg_opa(button, home_hero_bg_opa_idle(), 0);
-}
-
-static lv_obj_t * home_app_item_get_card(lv_obj_t * item)
-{
-    if(!item || lv_obj_get_child_count(item) == 0) return NULL;
-    return lv_obj_get_child(item, 0);
+    home_reset_press_scale(plate);
+    lv_obj_set_style_bg_opa(plate, home_hero_bg_opa_idle(), 0);
 }
 
 static bool home_is_press_end_event(lv_event_code_t code)
@@ -179,14 +152,10 @@ static bool home_is_press_end_event(lv_event_code_t code)
 
 static void home_reset_press_visuals(void)
 {
-    home_reset_hero_button_visual(g_home_view.hero_button);
+    home_reset_hero_plate_visual(g_home_view.hero.plate);
 
-    if(!g_home_view.app_grid) return;
-
-    uint32_t child_count = lv_obj_get_child_count(g_home_view.app_grid);
-    for(uint32_t i = 0; i < child_count; ++i) {
-        lv_obj_t * item = lv_obj_get_child(g_home_view.app_grid, i);
-        home_reset_app_card_visual(home_app_item_get_card(item));
+    for(uint32_t i = 0; i < HOME_APP_COUNT; ++i) {
+        home_reset_app_plate_visual(g_home_view.apps[i].plate);
     }
 }
 
@@ -208,20 +177,6 @@ static void home_start_anim(lv_obj_t * obj,
     lv_anim_set_time(&anim, duration);
     lv_anim_set_exec_cb(&anim, exec_cb);
     lv_anim_start(&anim);
-}
-
-/* 初始化 AI 卡片使用的渐变背景。 */
-static void home_init_hero_gradient(void)
-{
-    const lv_color_t colors[] = { lv_color_hex(0x9d174d), lv_color_hex(0xf472b6) };
-    const lv_opa_t opas[] = {
-        (lv_opa_t)(LV_OPA_COVER * 94 / 100),
-        (lv_opa_t)(LV_OPA_COVER * 84 / 100)
-    };
-    const uint8_t fracs[] = { 0, 255 };
-
-    lv_grad_init_stops(&g_home_hero_grad, colors, opas, fracs, 2);
-    lv_grad_linear_init(&g_home_hero_grad, lv_pct(8), lv_pct(18), lv_pct(92), lv_pct(82), LV_GRAD_EXTEND_PAD);
 }
 
 /* 初始化小按钮图标底色渐变，恢复重构前的视觉层次。 */
@@ -248,6 +203,49 @@ static lv_obj_t * home_create_base_container(lv_obj_t * parent, int32_t width, i
     lv_obj_set_size(obj, width, height);
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     return obj;
+}
+
+static void home_extend_draw_size_event_cb(lv_event_t * e)
+{
+    int32_t size = (int32_t)(uintptr_t)lv_event_get_user_data(e);
+    lv_event_set_ext_draw_size(e, size);
+}
+
+static void home_enable_child_overflow(lv_obj_t * obj, int32_t extra_draw_size)
+{
+    if(!obj) return;
+
+    lv_obj_add_flag(obj, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    lv_obj_add_event_cb(obj,
+                        home_extend_draw_size_event_cb,
+                        LV_EVENT_REFR_EXT_DRAW_SIZE,
+                        (void *)(uintptr_t)extra_draw_size);
+    lv_obj_refresh_ext_draw_size(obj);
+}
+
+static home_pressable_t home_create_pressable(lv_obj_t * parent, int32_t width, int32_t height)
+{
+    home_pressable_t pressable = { 0 };
+
+    pressable.root = lv_btn_create(parent);
+    lv_obj_remove_style_all(pressable.root);
+    lv_obj_set_size(pressable.root, width, height);
+    lv_obj_set_style_bg_opa(pressable.root, LV_OPA_0, 0);
+    lv_obj_set_style_pad_all(pressable.root, 0, 0);
+    lv_obj_set_style_border_width(pressable.root, 0, 0);
+    lv_obj_set_style_shadow_width(pressable.root, 0, 0);
+    lv_obj_clear_flag(pressable.root, LV_OBJ_FLAG_SCROLLABLE);
+    home_enable_child_overflow(pressable.root, HOME_PRESSABLE_EXT_DRAW_SIZE);
+
+    pressable.plate = home_create_base_container(pressable.root, width, height);
+    lv_obj_set_style_transform_pivot_x(pressable.plate, width / 2, 0);
+    lv_obj_set_style_transform_pivot_y(pressable.plate, height / 2, 0);
+    lv_obj_center(pressable.plate);
+
+    pressable.content = home_create_base_container(pressable.root, width, height);
+    lv_obj_center(pressable.content);
+
+    return pressable;
 }
 
 /* 创建基础文字对象，统一默认样式。 */
@@ -308,8 +306,8 @@ static bool home_get_local_time(struct tm * out_time)
 #endif
 }
 
-/* 刷新时钟和日期显示。 */
-static void home_update_clock(void)
+/* 仅在分钟或日期变化时更新标签，避免无意义的文本重绘。 */
+static void home_update_clock(bool force)
 {
     if(!g_home_view.time_hour || !g_home_view.time_minute || !g_home_view.date_label) return;
 
@@ -319,24 +317,43 @@ static void home_update_clock(void)
     char hour_buf[3];
     char minute_buf[3];
     char date_buf[48];
+    int32_t date_key = local_time.tm_year * 366 + local_time.tm_yday;
+    int32_t minute_key = ((date_key * 24 + local_time.tm_hour) * 60) + local_time.tm_min;
     const char * week_day = kHomeWeekDays[
         (local_time.tm_wday >= 0 && local_time.tm_wday <= 6) ? local_time.tm_wday : 0
     ];
 
-    lv_snprintf(hour_buf, sizeof(hour_buf), "%02d", local_time.tm_hour);
-    lv_snprintf(minute_buf, sizeof(minute_buf), "%02d", local_time.tm_min);
-    lv_snprintf(date_buf, sizeof(date_buf), "%d月%d日 %s", local_time.tm_mon + 1, local_time.tm_mday, week_day);
+    if(force || minute_key != g_home_view.displayed_minute_key) {
+        lv_snprintf(hour_buf, sizeof(hour_buf), "%02d", local_time.tm_hour);
+        lv_snprintf(minute_buf, sizeof(minute_buf), "%02d", local_time.tm_min);
+        lv_label_set_text(g_home_view.time_hour, hour_buf);
+        lv_label_set_text(g_home_view.time_minute, minute_buf);
+        g_home_view.displayed_minute_key = minute_key;
+    }
 
-    lv_label_set_text(g_home_view.time_hour, hour_buf);
-    lv_label_set_text(g_home_view.time_minute, minute_buf);
-    lv_label_set_text(g_home_view.date_label, date_buf);
+    if(force || date_key != g_home_view.displayed_date_key) {
+        lv_snprintf(date_buf, sizeof(date_buf), "%d月%d日 %s", local_time.tm_mon + 1, local_time.tm_mday, week_day);
+        lv_label_set_text(g_home_view.date_label, date_buf);
+        g_home_view.displayed_date_key = date_key;
+    }
 }
 
-/* 每秒刷新一次首页时钟。 */
+static void home_set_colon_bright(bool bright)
+{
+    if(!g_home_view.time_colon) return;
+
+    g_home_view.colon_bright = bright;
+    lv_obj_set_style_text_opa(g_home_view.time_colon,
+                              bright ? LV_OPA_COVER : (lv_opa_t)(LV_OPA_COVER * 20 / 100),
+                              0);
+}
+
+/* 每秒检查时钟变化，并以整秒切换冒号，避免连续逐帧动画。 */
 static void home_clock_timer_cb(lv_timer_t * timer)
 {
     (void)timer;
-    home_update_clock();
+    home_update_clock(false);
+    home_set_colon_bright(!g_home_view.colon_bright);
 }
 
 /* 统一判断当前点击是否应被控制中心或拖拽释放拦截。 */
@@ -357,24 +374,20 @@ static void home_hero_event_cb(lv_event_t * e)
 {
     lv_event_code_t code = lv_event_get_code(e);
     lv_obj_t * button = lv_event_get_current_target(e);
+    lv_obj_t * plate = g_home_view.hero.plate;
 
-    if(!button) return;
+    if(!button || !plate) return;
 
     if(home_is_press_end_event(code)) {
         bool should_open = code == LV_EVENT_RELEASED && home_is_valid_release(e) && !ui_ControlCenter_is_visible();
         if(should_open) {
-            home_reset_hero_button_visual(button);
+            home_reset_hero_plate_visual(plate);
             home_open_screen(&ui_AIChatScreen);
         } else {
-            home_start_anim(button,
-                            (lv_anim_exec_xcb_t)home_set_press_inset,
-                            home_get_press_inset(button),
-                            0,
-                            110);
-            home_start_anim(button,
-                            (lv_anim_exec_xcb_t)home_set_bg_opa,
-                            (int32_t)home_get_bg_opa(button),
-                            (int32_t)home_hero_bg_opa_idle(),
+            home_start_anim(plate,
+                            (lv_anim_exec_xcb_t)home_set_press_scale,
+                            home_get_press_scale(plate),
+                            LV_SCALE_NONE,
                             110);
         }
         return;
@@ -383,15 +396,10 @@ static void home_hero_event_cb(lv_event_t * e)
     if(ui_ControlCenter_is_visible()) return;
 
     if(code == LV_EVENT_PRESSED) {
-        home_start_anim(button,
-                        (lv_anim_exec_xcb_t)home_set_press_inset,
-                        home_get_press_inset(button),
-                        HOME_HERO_PRESSED_INSET,
-                        90);
-        home_start_anim(button,
-                        (lv_anim_exec_xcb_t)home_set_bg_opa,
-                        (int32_t)home_get_bg_opa(button),
-                        (int32_t)home_hero_bg_opa_pressed(),
+        home_start_anim(plate,
+                        (lv_anim_exec_xcb_t)home_set_press_scale,
+                        home_get_press_scale(plate),
+                        HOME_HERO_PRESSED_SCALE,
                         90);
     }
 }
@@ -401,32 +409,32 @@ static void home_app_event_cb(lv_event_t * e)
 {
     lv_event_code_t code = lv_event_get_code(e);
     lv_obj_t * item = lv_event_get_current_target(e);
-    lv_obj_t * card = home_app_item_get_card(item);
+    uint8_t index = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+    lv_obj_t * plate = index < HOME_APP_COUNT ? g_home_view.apps[index].plate : NULL;
 
     if(!item) return;
 
     if(home_is_press_end_event(code)) {
         bool should_open = code == LV_EVENT_RELEASED && home_is_valid_release(e) && !ui_ControlCenter_is_visible();
 
-        if(card) {
+        if(plate) {
             if(should_open) {
-                home_reset_app_card_visual(card);
+                home_reset_app_plate_visual(plate);
             } else {
-                home_start_anim(card,
-                                (lv_anim_exec_xcb_t)home_set_press_inset,
-                                home_get_press_inset(card),
-                                0,
+                home_start_anim(plate,
+                                (lv_anim_exec_xcb_t)home_set_press_scale,
+                                home_get_press_scale(plate),
+                                LV_SCALE_NONE,
                                 120);
-                home_start_anim(card,
+                home_start_anim(plate,
                                 (lv_anim_exec_xcb_t)home_set_shadow_opa,
-                                (int32_t)home_get_shadow_opa(card),
+                                (int32_t)home_get_shadow_opa(plate),
                                 (int32_t)home_app_card_shadow_opa_idle(),
                                 120);
             }
         }
 
         if(should_open) {
-            uint8_t index = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
             if(index < HOME_APP_COUNT) {
                 home_open_screen(kHomeApps[index].target_screen);
             }
@@ -437,14 +445,14 @@ static void home_app_event_cb(lv_event_t * e)
     if(ui_ControlCenter_is_visible()) return;
 
     if(code == LV_EVENT_PRESSED) {
-        if(card) {
-            home_start_anim(card,
-                            (lv_anim_exec_xcb_t)home_set_press_inset,
-                            home_get_press_inset(card),
-                            HOME_APP_PRESSED_INSET,
+        if(plate) {
+            home_start_anim(plate,
+                            (lv_anim_exec_xcb_t)home_set_press_scale,
+                            home_get_press_scale(plate),
+                            HOME_APP_PRESSED_SCALE,
                             90);
-            home_start_anim(card, (lv_anim_exec_xcb_t)home_set_shadow_opa,
-                            (int32_t)home_get_shadow_opa(card),
+            home_start_anim(plate, (lv_anim_exec_xcb_t)home_set_shadow_opa,
+                            (int32_t)home_get_shadow_opa(plate),
                             (int32_t)home_app_card_shadow_opa_pressed(),
                             90);
         }
@@ -455,25 +463,21 @@ static void home_app_event_cb(lv_event_t * e)
 static void home_screen_event_cb(lv_event_t * e)
 {
     lv_event_code_t code = lv_event_get_code(e);
-    if(code == LV_EVENT_SCREEN_LOAD_START || code == LV_EVENT_SCREEN_UNLOAD_START) {
+
+    if(code == LV_EVENT_SCREEN_LOAD_START) {
         home_reset_press_visuals();
+        home_update_clock(true);
+        home_set_colon_bright(true);
+        if(g_home_view.clock_timer) {
+            lv_timer_reset(g_home_view.clock_timer);
+            lv_timer_resume(g_home_view.clock_timer);
+        }
+    } else if(code == LV_EVENT_SCREEN_UNLOAD_START) {
+        home_reset_press_visuals();
+        if(g_home_view.clock_timer) {
+            lv_timer_pause(g_home_view.clock_timer);
+        }
     }
-}
-
-/* 创建时钟闪烁的冒号动画。 */
-static void home_start_colon_blink_anim(void)
-{
-    if(!g_home_view.time_colon) return;
-
-    lv_anim_t anim;
-    lv_anim_init(&anim);
-    lv_anim_set_var(&anim, g_home_view.time_colon);
-    lv_anim_set_values(&anim, LV_OPA_COVER, (lv_opa_t)(LV_OPA_COVER * 20 / 100));
-    lv_anim_set_time(&anim, 500);
-    lv_anim_set_playback_time(&anim, 500);
-    lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_set_exec_cb(&anim, (lv_anim_exec_xcb_t)home_set_text_opa);
-    lv_anim_start(&anim);
 }
 
 /* 构建顶部时钟和日期区域。 */
@@ -492,18 +496,16 @@ static lv_obj_t * home_build_clock_section(lv_obj_t * parent)
     lv_obj_set_style_text_letter_space(g_home_view.time_hour, -2, 0);
 
     g_home_view.time_colon = home_create_base_label(time_row, ":", &lv_font_montserrat_32, lv_color_white());
-    lv_obj_set_style_text_opa(g_home_view.time_colon, (lv_opa_t)(LV_OPA_COVER * 55 / 100), 0);
+    lv_obj_set_style_text_opa(g_home_view.time_colon, LV_OPA_COVER, 0);
     lv_obj_set_style_text_letter_space(g_home_view.time_colon, -1, 0);
 
     g_home_view.time_minute = home_create_base_label(time_row, "00", &lv_font_montserrat_44, lv_color_white());
     lv_obj_set_style_text_letter_space(g_home_view.time_minute, -2, 0);
 
     g_home_view.date_label = home_create_base_label(clock_container, "1月1日 星期一", ui_builtin_text_font(), lv_color_white());
-    lv_obj_set_style_text_opa(g_home_view.date_label, (lv_opa_t)(LV_OPA_COVER * 30 / 100), 0);
+    lv_obj_set_style_text_opa(g_home_view.date_label, (lv_opa_t)(LV_OPA_COVER * 50 / 100), 0);
     lv_obj_set_style_text_letter_space(g_home_view.date_label, 1, 0);
     lv_obj_align(g_home_view.date_label, LV_ALIGN_TOP_MID, 0, 52);
-
-    home_start_colon_blink_anim();
 
     return clock_container;
 }
@@ -511,27 +513,34 @@ static lv_obj_t * home_build_clock_section(lv_obj_t * parent)
 /* 构建 AI 男友入口卡片。 */
 static lv_obj_t * home_build_hero_button(lv_obj_t * parent, lv_obj_t * anchor)
 {
-    lv_obj_t * button = lv_btn_create(parent);
-    lv_obj_remove_style_all(button);
-    lv_obj_set_size(button, 198, 66);
-    lv_obj_set_style_radius(button, 22, 0);
-    lv_obj_set_style_bg_color(button, lv_color_hex(0xbe185d), 0);
-    lv_obj_set_style_bg_opa(button, home_hero_bg_opa_idle(), 0);
-    lv_obj_set_style_bg_grad(button, &g_home_hero_grad, 0);
-    lv_obj_set_style_border_width(button, 1, 0);
-    lv_obj_set_style_border_color(button, lv_color_white(), 0);
-    lv_obj_set_style_border_opa(button, (lv_opa_t)(LV_OPA_COVER * 12 / 100), 0);
-    lv_obj_set_style_pad_hor(button, 20, 0);
-    lv_obj_set_style_pad_gap(button, 16, 0);
-    lv_obj_set_flex_flow(button, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(button, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    home_pressable_t pressable = home_create_pressable(parent, 198, 66);
+    lv_obj_t * button = pressable.root;
+    lv_obj_t * plate = pressable.plate;
+    lv_obj_t * content = pressable.content;
+
     lv_obj_align_to(button, anchor, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
     lv_obj_add_event_cb(button, home_hero_event_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(button, home_hero_event_cb, LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(button, home_hero_event_cb, LV_EVENT_PRESS_LOST, NULL);
     lv_obj_add_event_cb(button, home_hero_event_cb, LV_EVENT_CANCEL, NULL);
 
-    lv_obj_t * icon_box = home_create_base_container(button, 40, 40);
+    lv_obj_set_style_radius(plate, 22, 0);
+    lv_obj_set_style_bg_color(plate, lv_color_hex(0xb24d72), 0);
+    lv_obj_set_style_bg_opa(plate, home_hero_bg_opa_idle(), 0);
+    lv_obj_set_style_border_width(plate, 2, 0);
+    lv_obj_set_style_border_color(plate, lv_color_white(), 0);
+    lv_obj_set_style_border_opa(plate, (lv_opa_t)(LV_OPA_COVER * 12 / 100), 0);
+    lv_obj_set_style_shadow_width(plate, 5, 0);
+    lv_obj_set_style_shadow_color(plate, lv_color_hex(0x681f42), 0);
+    lv_obj_set_style_shadow_opa(plate, (lv_opa_t)(LV_OPA_COVER * 20 / 100), 0);
+    lv_obj_set_style_shadow_ofs_y(plate, 2, 0);
+
+    lv_obj_set_style_pad_hor(content, 20, 0);
+    lv_obj_set_style_pad_gap(content, 16, 0);
+    lv_obj_set_flex_flow(content, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t * icon_box = home_create_base_container(content, 40, 40);
     lv_obj_set_style_radius(icon_box, 12, 0);
     lv_obj_set_style_bg_color(icon_box, lv_color_hex(0xfbcfe8), 0);
     lv_obj_set_style_bg_opa(icon_box, (lv_opa_t)(LV_OPA_COVER * 20 / 100), 0);
@@ -546,13 +555,13 @@ static lv_obj_t * home_build_hero_button(lv_obj_t * parent, lv_obj_t * anchor)
     lv_obj_set_style_image_recolor_opa(icon, LV_OPA_COVER, 0);
     ui_make_decor_hit_passthrough(icon);
 
-    lv_obj_t * title = home_create_base_label(button, "专属陪伴\n随时陪着你", ui_builtin_text_font(), lv_color_white());
+    lv_obj_t * title = home_create_base_label(content, "专属陪伴\n随时陪着你", ui_builtin_text_font(), lv_color_white());
     lv_obj_set_style_text_opa(title, LV_OPA_COVER, 0);
     lv_obj_set_style_text_letter_space(title, 1, 0);
     lv_obj_set_style_text_line_space(title, 2, 0);
     ui_make_decor_hit_passthrough(title);
 
-    g_home_view.hero_button = button;
+    g_home_view.hero = pressable;
     return button;
 }
 
@@ -564,39 +573,35 @@ static lv_obj_t * home_build_app_item(lv_obj_t * parent, const home_app_config_t
     lv_color_t accent = lv_color_hex(config->accent_hex);
     lv_color_t glow = lv_color_hex(config->glow_hex);
 
-    lv_obj_t * item = lv_btn_create(parent);
-    lv_obj_remove_style_all(item);
-    lv_obj_set_size(item, config->w, config->h);
+    home_pressable_t pressable = home_create_pressable(parent, config->w, config->h);
+    lv_obj_t * item = pressable.root;
+    lv_obj_t * plate = pressable.plate;
+    lv_obj_t * content = pressable.content;
+
     lv_obj_set_pos(item, config->x, config->y);
-    lv_obj_set_style_bg_opa(item, LV_OPA_0, 0);
-    lv_obj_set_style_pad_all(item, 0, 0);
-    lv_obj_set_style_border_width(item, 0, 0);
-    lv_obj_set_style_shadow_width(item, 0, 0);
-    lv_obj_set_style_radius(item, 0, 0);
-    lv_obj_clear_flag(item, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(item, home_app_event_cb, LV_EVENT_PRESSED, (void *)(uintptr_t)index);
     lv_obj_add_event_cb(item, home_app_event_cb, LV_EVENT_RELEASED, (void *)(uintptr_t)index);
     lv_obj_add_event_cb(item, home_app_event_cb, LV_EVENT_PRESS_LOST, (void *)(uintptr_t)index);
     lv_obj_add_event_cb(item, home_app_event_cb, LV_EVENT_CANCEL, (void *)(uintptr_t)index);
 
-    lv_obj_t * card = home_create_base_container(item, config->w, config->h);
-    lv_obj_set_style_radius(card, 15, 0);
-    lv_obj_set_style_bg_color(card, accent, 0);
-    lv_obj_set_style_bg_opa(card, (lv_opa_t)(LV_OPA_COVER * 28 / 100), 0);
-    lv_obj_set_style_border_width(card, 1, 0);
-    lv_obj_set_style_border_color(card, accent, 0);
-    lv_obj_set_style_border_opa(card, (lv_opa_t)(LV_OPA_COVER * 26 / 100), 0);
-    lv_obj_set_style_shadow_width(card, 8, 0);
-    lv_obj_set_style_shadow_color(card, glow, 0);
-    lv_obj_set_style_shadow_opa(card, (lv_opa_t)(LV_OPA_COVER * 32 / 100), 0);
-    lv_obj_set_style_shadow_ofs_y(card, 2, 0);
-    lv_obj_set_style_pad_left(card, 12, 0);
-    lv_obj_set_style_pad_right(card, 12, 0);
-    lv_obj_set_style_pad_gap(card, 5, 0);
-    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_radius(plate, 15, 0);
+    lv_obj_set_style_bg_color(plate, accent, 0);
+    lv_obj_set_style_bg_opa(plate, (lv_opa_t)(LV_OPA_COVER * 28 / 100), 0);
+    lv_obj_set_style_border_width(plate, 2, 0);
+    lv_obj_set_style_border_color(plate, accent, 0);
+    lv_obj_set_style_border_opa(plate, (lv_opa_t)(LV_OPA_COVER * 18 / 100), 0);
+    lv_obj_set_style_shadow_width(plate, 5, 0);
+    lv_obj_set_style_shadow_color(plate, glow, 0);
+    lv_obj_set_style_shadow_opa(plate, (lv_opa_t)(LV_OPA_COVER * 24 / 100), 0);
+    lv_obj_set_style_shadow_ofs_y(plate, 1, 0);
 
-    lv_obj_t * icon_box = home_create_base_container(card, 28, 28);
+    lv_obj_set_style_pad_left(content, 12, 0);
+    lv_obj_set_style_pad_right(content, 12, 0);
+    lv_obj_set_style_pad_gap(content, 5, 0);
+    lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(content, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t * icon_box = home_create_base_container(content, 28, 28);
     lv_obj_set_style_radius(icon_box, 9, 0);
     lv_obj_set_style_bg_color(icon_box, lv_color_hex(config->icon_grad_start_hex), 0);
     lv_obj_set_style_bg_opa(icon_box, LV_OPA_COVER, 0);
@@ -616,10 +621,11 @@ static lv_obj_t * home_build_app_item(lv_obj_t * parent, const home_app_config_t
     lv_obj_set_style_image_recolor_opa(icon, LV_OPA_COVER, 0);
     ui_make_decor_hit_passthrough(icon);
 
-    lv_obj_t * label = home_create_base_label(card, config->label_text, ui_builtin_text_font(), accent);
+    lv_obj_t * label = home_create_base_label(content, config->label_text, ui_builtin_text_font(), accent);
     lv_obj_set_style_text_opa(label, (lv_opa_t)(LV_OPA_COVER * 78 / 100), 0);
     ui_make_decor_hit_passthrough(label);
 
+    g_home_view.apps[index] = pressable;
     return item;
 }
 
@@ -627,8 +633,8 @@ static lv_obj_t * home_build_app_item(lv_obj_t * parent, const home_app_config_t
 static lv_obj_t * home_build_app_grid(lv_obj_t * parent, lv_obj_t * anchor)
 {
     lv_obj_t * grid = home_create_base_container(parent, 198, 132);
+    home_enable_child_overflow(grid, HOME_PRESSABLE_EXT_DRAW_SIZE);
     lv_obj_align_to(grid, anchor, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
-    g_home_view.app_grid = grid;
 
     for(uint8_t i = 0; i < HOME_APP_COUNT; ++i) {
         (void)home_build_app_item(grid, &kHomeApps[i], i);
@@ -654,13 +660,10 @@ static void home_build_screen_root(void)
 /* 清理运行时缓存指针，便于页面销毁后安全重建。 */
 static void home_reset_runtime_state(void)
 {
-    g_home_view.time_hour = NULL;
-    g_home_view.time_colon = NULL;
-    g_home_view.time_minute = NULL;
-    g_home_view.date_label = NULL;
-    g_home_view.hero_button = NULL;
-    g_home_view.app_grid = NULL;
-    g_home_view.clock_timer = NULL;
+    g_home_view = (home_view_t) { 0 };
+    g_home_view.displayed_minute_key = -1;
+    g_home_view.displayed_date_key = -1;
+    g_home_view.colon_bright = true;
 }
 
 void ui_HomeScreen_init(void)
@@ -668,7 +671,6 @@ void ui_HomeScreen_init(void)
     if(ui_HomeScreen) return;
 
     home_reset_runtime_state();
-    home_init_hero_gradient();
     home_init_app_icon_gradients();
     home_build_screen_root();
 
@@ -677,8 +679,11 @@ void ui_HomeScreen_init(void)
     (void)home_build_app_grid(ui_HomeScreen, hero_button);
 
     ui_ControlCenter_init(ui_HomeScreen);
-    home_update_clock();
+    home_update_clock(true);
     g_home_view.clock_timer = lv_timer_create(home_clock_timer_cb, 1000, NULL);
+    if(g_home_view.clock_timer) {
+        lv_timer_pause(g_home_view.clock_timer);
+    }
     app_screen_enable_swipe_back(ui_HomeScreen);
 }
 
@@ -687,10 +692,6 @@ void ui_HomeScreen_deinit(void)
     if(g_home_view.clock_timer) {
         lv_timer_delete(g_home_view.clock_timer);
         g_home_view.clock_timer = NULL;
-    }
-
-    if(g_home_view.time_colon) {
-        lv_anim_del(g_home_view.time_colon, (lv_anim_exec_xcb_t)home_set_text_opa);
     }
 
     ui_ControlCenter_deinit();

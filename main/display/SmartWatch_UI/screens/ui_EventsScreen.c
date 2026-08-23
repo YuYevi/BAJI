@@ -1,6 +1,6 @@
 /**
  * @file ui_EventsScreen.c
- * @brief 事件提醒屏幕实现
+ * @brief 日历日期浏览屏幕实现
  *
  * 说明：
  *   - 顶部展示当前选中日期
@@ -27,8 +27,10 @@ extern const lv_image_dsc_t * const event_day_digit_images[31];
 #define EV_TAP_SLOP_PX   12
 #define EV_STRIP_H       80
 #define EV_STRIP_Y       (-30)
+#define EV_FADE_W         65
 #define EV_HEADER_Y      40
 #define EV_HEADER_H      220
+#define EV_DATE_REFRESH_MS 60000
 
 typedef struct {
     lv_obj_t * root;
@@ -48,6 +50,7 @@ typedef struct {
     lv_obj_t * strip_wrap;
     lv_obj_t * strip;
     lv_obj_t * strip_touch;
+    lv_timer_t * date_timer;
     ev_cell_view_t cells[EV_CELL_CNT];
     lv_grad_dsc_t fade_left;
     lv_grad_dsc_t fade_right;
@@ -60,11 +63,13 @@ typedef struct {
     lv_point_t press_point;
     int32_t drag_x;
     int32_t snap_delta;
+    int32_t today_year;
+    int32_t today_yday;
+    bool today_valid;
 } ev_state_t;
 
 typedef struct {
     struct tm tm;
-    int32_t offset_days;
     bool is_today;
     bool is_weekend;
 } ev_day_info_t;
@@ -79,7 +84,7 @@ static void ev_enable_swipe_back_async(void * user_data)
 {
     lv_obj_t * screen = (lv_obj_t *)user_data;
 
-    if(screen) {
+    if(screen && screen == ui_EventsScreen) {
         app_screen_set_swipe_back_enabled(screen, true);
     }
 }
@@ -92,16 +97,6 @@ static void ev_restore_swipe_back(void)
 
     lv_async_call_cancel(ev_enable_swipe_back_async, ui_EventsScreen);
     (void)lv_async_call(ev_enable_swipe_back_async, ui_EventsScreen);
-}
-
-static void ev_set_scale(void * obj, int32_t value)
-{
-    if(!obj) {
-        return;
-    }
-
-    lv_obj_set_style_transform_scale_x((lv_obj_t *)obj, value, 0);
-    lv_obj_set_style_transform_scale_y((lv_obj_t *)obj, value, 0);
 }
 
 static void ev_set_translate_x(void * obj, int32_t value)
@@ -142,14 +137,14 @@ static void ev_init_gradients(void)
     uint8_t left_fracs[] = { 0, 255 };
 
     lv_grad_init_stops(&ev_view.fade_left, left_colors, left_opas, left_fracs, 2);
-    lv_grad_linear_init(&ev_view.fade_left, 0, 0, 65, 0, LV_GRAD_EXTEND_PAD);
+    lv_grad_linear_init(&ev_view.fade_left, 0, 0, EV_FADE_W, 0, LV_GRAD_EXTEND_PAD);
 
     lv_color_t right_colors[] = { lv_color_hex(EV_BG), lv_color_hex(EV_BG) };
     lv_opa_t right_opas[] = { LV_OPA_0, LV_OPA_COVER };
     uint8_t right_fracs[] = { 0, 255 };
 
     lv_grad_init_stops(&ev_view.fade_right, right_colors, right_opas, right_fracs, 2);
-    lv_grad_linear_init(&ev_view.fade_right, 295, 0, 360, 0, LV_GRAD_EXTEND_PAD);
+    lv_grad_linear_init(&ev_view.fade_right, 0, 0, EV_FADE_W, 0, LV_GRAD_EXTEND_PAD);
 }
 
 static void ev_reset_style(lv_obj_t * obj)
@@ -162,37 +157,53 @@ static void ev_disable_interaction(lv_obj_t * obj)
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
 }
 
-static void ev_fill_tm(time_t ts, struct tm * out)
+static bool ev_fill_tm(time_t ts, struct tm * out)
 {
 #if defined(_WIN32)
     struct tm buffer;
 
     if(localtime_s(&buffer, &ts) == 0) {
         *out = buffer;
+        return true;
     } else {
         lv_memzero(out, sizeof(*out));
+        return false;
     }
 #else
     struct tm * t = localtime(&ts);
 
     if(t) {
         *out = *t;
+        return true;
     } else {
         lv_memzero(out, sizeof(*out));
+        return false;
     }
 #endif
 }
 
-static void ev_get_day_info(int32_t offset_days, ev_day_info_t * out)
+static bool ev_get_day_info(int32_t offset_days, ev_day_info_t * out)
 {
-    /* 统一把“偏移天数”转换成界面渲染所需的日期信息。 */
-    time_t now = time(NULL);
-    time_t ts = now + (time_t)offset_days * 24 * 60 * 60;
+    struct tm day;
 
-    ev_fill_tm(ts, &out->tm);
-    out->offset_days = offset_days;
+    if(!out || !ev_fill_tm(time(NULL), &day)) {
+        return false;
+    }
+
+    /* Normalize at noon so calendar-day navigation is stable across DST changes. */
+    day.tm_hour = 12;
+    day.tm_min = 0;
+    day.tm_sec = 0;
+    day.tm_mday += offset_days;
+    day.tm_isdst = -1;
+    if(mktime(&day) == (time_t)-1) {
+        return false;
+    }
+
+    out->tm = day;
     out->is_today = (offset_days == 0);
     out->is_weekend = (out->tm.tm_wday == 0 || out->tm.tm_wday == 6);
+    return true;
 }
 
 static void ev_start_int_anim(lv_obj_t * obj, lv_anim_exec_xcb_t exec_cb,
@@ -245,10 +256,12 @@ static void ev_play_change_animations(void)
                       180, NULL, NULL);
 
     if(ev_view.today_badge && !lv_obj_has_flag(ev_view.today_badge, LV_OBJ_FLAG_HIDDEN)) {
-        lv_obj_set_style_transform_scale_x(ev_view.today_badge, 0, 0);
-        lv_obj_set_style_transform_scale_y(ev_view.today_badge, 0, 0);
-        ev_start_int_anim(ev_view.today_badge, (lv_anim_exec_xcb_t)ev_set_scale,
-                          0, LV_SCALE_NONE, 300, lv_anim_path_overshoot, NULL);
+        lv_obj_set_style_translate_y(ev_view.today_badge, 4, 0);
+        lv_obj_set_style_opa(ev_view.today_badge, LV_OPA_0, 0);
+        ev_start_int_anim(ev_view.today_badge, (lv_anim_exec_xcb_t)ev_set_translate_y,
+                          4, 0, 180, lv_anim_path_ease_out, NULL);
+        ev_start_int_anim(ev_view.today_badge, (lv_anim_exec_xcb_t)ev_set_opa,
+                          LV_OPA_0, LV_OPA_COVER, 160, NULL, NULL);
     }
 }
 
@@ -293,17 +306,11 @@ static void ev_update_cell(int32_t index, const ev_day_info_t * info)
 
     lv_snprintf(day_buf, sizeof(day_buf), "%d", info->tm.tm_mday);
 
-    lv_obj_set_style_transform_scale_x(cell->root,
-                                       is_center ? LV_SCALE_NONE : (int32_t)(LV_SCALE_NONE * 82 / 100), 0);
-    lv_obj_set_style_transform_scale_y(cell->root,
-                                       is_center ? LV_SCALE_NONE : (int32_t)(LV_SCALE_NONE * 82 / 100), 0);
-    lv_obj_set_style_opa(cell->root,
-                         is_center ? LV_OPA_COVER : (lv_opa_t)(LV_OPA_COVER * opa_pct / 100), 0);
-
     if(show_month_mark) {
         char mark_buf[8];
         lv_snprintf(mark_buf, sizeof(mark_buf), "%d月", info->tm.tm_mon + 1);
         lv_label_set_text(cell->mark, mark_buf);
+        lv_obj_set_style_text_opa(cell->mark, (lv_opa_t)(LV_OPA_COVER * opa_pct / 100), 0);
         lv_obj_clear_flag(cell->mark, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(cell->weekday, LV_OBJ_FLAG_HIDDEN);
     } else {
@@ -322,13 +329,13 @@ static void ev_update_cell(int32_t index, const ev_day_info_t * info)
         lv_obj_set_style_text_opa(cell->day, LV_OPA_COVER, 0);
     } else {
         lv_obj_set_style_text_color(cell->weekday,
-                                    info->is_weekend ? lv_color_hex(EV_ACCENT) : lv_color_hex(0x474747), 0);
+                                    info->is_weekend ? lv_color_hex(EV_ACCENT) : lv_color_hex(0x737373), 0);
         lv_obj_set_style_text_opa(cell->weekday,
                                   (lv_opa_t)(LV_OPA_COVER * opa_pct / 100), 0);
         lv_obj_set_style_text_font(cell->day, &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(cell->day,
                                     info->is_today ? lv_color_hex(EV_GREEN) :
-                                    info->is_weekend ? lv_color_hex(EV_ACCENT) : lv_color_hex(0x616161), 0);
+                                    info->is_weekend ? lv_color_hex(EV_ACCENT) : lv_color_hex(0x8a8a8a), 0);
         lv_obj_set_style_text_opa(cell->day,
                                   (lv_opa_t)(LV_OPA_COVER * opa_pct / 100), 0);
     }
@@ -347,8 +354,9 @@ static void ev_refresh_cells(void)
     ev_day_info_t info;
 
     for(int32_t i = 0; i < EV_CELL_CNT; ++i) {
-        ev_get_day_info(ev_state.offset_days + (i - EV_CENTER), &info);
-        ev_update_cell(i, &info);
+        if(ev_get_day_info(ev_state.offset_days + (i - EV_CENTER), &info)) {
+            ev_update_cell(i, &info);
+        }
     }
 }
 
@@ -357,7 +365,9 @@ static void ev_refresh_view(bool play_anim)
     ev_day_info_t selected;
 
     /* 顶部主日期和底部日期条始终由同一份状态驱动，避免显示不同步。 */
-    ev_get_day_info(ev_state.offset_days, &selected);
+    if(!ev_get_day_info(ev_state.offset_days, &selected)) {
+        return;
+    }
     ev_update_header(&selected);
     ev_refresh_cells();
 
@@ -379,11 +389,10 @@ static void ev_shift_days(int32_t delta_days)
 static void ev_apply_strip_visuals(int32_t drag_x)
 {
     static const uint8_t opa_table[] = { 100, 85, 70, 55, 40 };
-    static const uint8_t scale_table[] = { 100, 82, 78, 74, 70 };
     const int32_t max_index = (int32_t)(sizeof(opa_table) / sizeof(opa_table[0])) - 1;
     int32_t center_q8 = (EV_CENTER << 8) - (drag_x << 8) / EV_CELL_W;
 
-    /* 拖拽时用插值方式更新透明度与缩放，让日期条过渡更平滑。 */
+    /* 拖拽时只插值透明度，保持文字始终以原生字号清晰渲染。 */
     for(int32_t i = 0; i < EV_CELL_CNT; ++i) {
         ev_cell_view_t * cell = &ev_view.cells[i];
         int32_t dist_q8 = LV_ABS((i << 8) - center_q8);
@@ -391,12 +400,8 @@ static void ev_apply_strip_visuals(int32_t drag_x)
         int32_t dist_f = dist_q8 & 0xFF;
         uint8_t opa_a;
         uint8_t opa_b;
-        uint8_t scale_a;
-        uint8_t scale_b;
         int32_t opa_pct;
-        int32_t scale_pct;
         lv_opa_t opa;
-        int32_t scale;
 
         if(dist_i > max_index) {
             dist_i = max_index;
@@ -405,23 +410,16 @@ static void ev_apply_strip_visuals(int32_t drag_x)
 
         opa_a = opa_table[dist_i];
         opa_b = opa_table[dist_i < max_index ? dist_i + 1 : max_index];
-        scale_a = scale_table[dist_i];
-        scale_b = scale_table[dist_i < max_index ? dist_i + 1 : max_index];
 
         opa_pct = opa_a + ((int32_t)(opa_b - opa_a) * dist_f) / 256;
-        scale_pct = scale_a + ((int32_t)(scale_b - scale_a) * dist_f) / 256;
         opa_pct = LV_CLAMP(12, opa_pct, 100);
-        scale_pct = LV_CLAMP(70, scale_pct, 100);
 
         opa = (lv_opa_t)(LV_OPA_COVER * opa_pct / 100);
-        scale = (int32_t)(LV_SCALE_NONE * scale_pct / 100);
 
-        lv_obj_set_style_opa(cell->root, opa, 0);
-        lv_obj_set_style_transform_scale_x(cell->root, scale, 0);
-        lv_obj_set_style_transform_scale_y(cell->root, scale, 0);
         lv_obj_set_style_text_opa(cell->weekday, opa, 0);
         lv_obj_set_style_text_opa(cell->day, opa, 0);
         lv_obj_set_style_text_opa(cell->mark, opa, 0);
+        lv_obj_set_style_bg_opa(cell->dot, (lv_opa_t)(opa * 55 / 100), 0);
     }
 }
 
@@ -451,7 +449,9 @@ static void ev_strip_snap_ready_cb(lv_anim_t * anim)
 
 static void ev_stop_strip_motion(void)
 {
-    lv_anim_del(ev_view.strip, (lv_anim_exec_xcb_t)ev_set_translate_x);
+    if(ev_view.strip) {
+        lv_anim_del(ev_view.strip, (lv_anim_exec_xcb_t)ev_set_translate_x);
+    }
     ev_state.snap_delta = 0;
 
     if(ev_view.strip) {
@@ -468,6 +468,14 @@ static void ev_reset_runtime_state(void)
     ev_state.strip_dragged = false;
     ev_state.drag_x = 0;
     ev_state.snap_delta = 0;
+}
+
+static void ev_cancel_strip_drag(void)
+{
+    ev_state.strip_pressed = false;
+    ev_state.strip_dragged = false;
+    ev_stop_strip_motion();
+    ev_restore_swipe_back();
 }
 
 static bool ev_strip_point_to_index(const lv_point_t * point, int32_t * out_index)
@@ -621,8 +629,16 @@ static void ev_strip_event_cb(lv_event_t * e)
     }
 
     code = lv_event_get_code(e);
+    if(code == LV_EVENT_CANCEL) {
+        ev_cancel_strip_drag();
+        return;
+    }
+
     indev = lv_event_get_indev(e);
     if(!indev) {
+        if(code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+            ev_cancel_strip_drag();
+        }
         return;
     }
 
@@ -636,8 +652,58 @@ static void ev_strip_event_cb(lv_event_t * e)
         return;
     }
 
-    if(code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+    if(code == LV_EVENT_RELEASED) {
         ev_end_strip_drag(indev);
+        return;
+    }
+
+    if(code == LV_EVENT_PRESS_LOST) {
+        ev_cancel_strip_drag();
+    }
+}
+
+static void ev_remember_today(void)
+{
+    ev_day_info_t today;
+
+    ev_state.today_valid = ev_get_day_info(0, &today);
+    if(ev_state.today_valid) {
+        ev_state.today_year = today.tm.tm_year;
+        ev_state.today_yday = today.tm.tm_yday;
+    }
+}
+
+static void ev_date_timer_cb(lv_timer_t * timer)
+{
+    ev_day_info_t today;
+
+    (void)timer;
+    if(!ui_EventsScreen || lv_screen_active() != ui_EventsScreen ||
+       !ev_get_day_info(0, &today)) {
+        return;
+    }
+
+    if(!ev_state.today_valid ||
+       ev_state.today_year != today.tm.tm_year ||
+       ev_state.today_yday != today.tm.tm_yday) {
+        ev_state.today_valid = true;
+        ev_state.today_year = today.tm.tm_year;
+        ev_state.today_yday = today.tm.tm_yday;
+        ev_refresh_view(false);
+    }
+}
+
+static void ev_set_date_timer_running(bool running)
+{
+    if(!ev_view.date_timer) {
+        return;
+    }
+
+    if(running) {
+        lv_timer_reset(ev_view.date_timer);
+        lv_timer_resume(ev_view.date_timer);
+    } else {
+        lv_timer_pause(ev_view.date_timer);
     }
 }
 
@@ -657,8 +723,11 @@ static void ev_screen_event_cb(lv_event_t * e)
     if(code == LV_EVENT_SCREEN_LOADED) {
         ev_state.offset_days = 0;
         ev_sync_screen_state();
+        ev_remember_today();
         ev_refresh_view(true);
+        ev_set_date_timer_running(true);
     } else if(code == LV_EVENT_SCREEN_UNLOADED) {
+        ev_set_date_timer_running(false);
         ev_sync_screen_state();
     }
 }
@@ -689,13 +758,13 @@ static void ev_build_header(lv_obj_t * parent)
     ev_view.month_year = ev_create_label(ev_view.content, "");
     lv_obj_set_style_text_font(ev_view.month_year, ui_builtin_text_font(), 0);
     lv_obj_set_style_text_color(ev_view.month_year, lv_color_white(), 0);
-    lv_obj_set_style_text_opa(ev_view.month_year, (lv_opa_t)(LV_OPA_COVER * 32 / 100), 0);
-    lv_obj_set_style_text_letter_space(ev_view.month_year, 2, 0);
+    lv_obj_set_style_text_opa(ev_view.month_year, (lv_opa_t)(LV_OPA_COVER * 58 / 100), 0);
+    lv_obj_set_style_text_letter_space(ev_view.month_year, 0, 0);
 
     ev_view.day_big = lv_image_create(ev_view.content);
     ev_reset_style(ev_view.day_big);
     lv_image_set_src(ev_view.day_big, event_day_digit_images[0]);
-    lv_image_set_antialias(ev_view.day_big, true);
+    lv_image_set_antialias(ev_view.day_big, false);
     lv_obj_set_style_image_recolor(ev_view.day_big, lv_color_white(), 0);
     lv_obj_set_style_image_recolor_opa(ev_view.day_big, LV_OPA_COVER, 0);
     lv_obj_set_style_margin_top(ev_view.day_big, 10, 0);
@@ -713,8 +782,8 @@ static void ev_build_header(lv_obj_t * parent)
     ev_view.weekday = ev_create_label(ev_view.weekday_row, "");
     lv_obj_set_style_text_font(ev_view.weekday, ui_builtin_text_font(), 0);
     lv_obj_set_style_text_color(ev_view.weekday, lv_color_white(), 0);
-    lv_obj_set_style_text_opa(ev_view.weekday, (lv_opa_t)(LV_OPA_COVER * 50 / 100), 0);
-    lv_obj_set_style_text_letter_space(ev_view.weekday, 8, 0);
+    lv_obj_set_style_text_opa(ev_view.weekday, (lv_opa_t)(LV_OPA_COVER * 68 / 100), 0);
+    lv_obj_set_style_text_letter_space(ev_view.weekday, 0, 0);
 
     ev_view.today_badge = lv_obj_create(ev_view.weekday_row);
     ev_reset_style(ev_view.today_badge);
@@ -726,29 +795,26 @@ static void ev_build_header(lv_obj_t * parent)
     lv_obj_set_style_pad_right(ev_view.today_badge, 9, 0);
     lv_obj_set_style_pad_top(ev_view.today_badge, 2, 0);
     lv_obj_set_style_pad_bottom(ev_view.today_badge, 2, 0);
-    lv_obj_set_style_transform_pivot_x(ev_view.today_badge, 30, 0);
-    lv_obj_set_style_transform_pivot_y(ev_view.today_badge, 7, 0);
     ev_disable_interaction(ev_view.today_badge);
     lv_obj_add_flag(ev_view.today_badge, LV_OBJ_FLAG_HIDDEN);
 
     today_text = ev_create_label(ev_view.today_badge, "今天");
     lv_obj_set_style_text_font(today_text, ui_builtin_text_font(), 0);
     lv_obj_set_style_text_color(today_text, lv_color_white(), 0);
-    lv_obj_set_style_text_letter_space(today_text, 6, 0);
+    lv_obj_set_style_text_letter_space(today_text, 0, 0);
 }
 
 static void ev_build_strip_cell(lv_obj_t * parent, int32_t index)
 {
     ev_cell_view_t * cell = &ev_view.cells[index];
 
-    cell->root = lv_btn_create(parent);
+    cell->root = lv_obj_create(parent);
     ev_reset_style(cell->root);
     lv_obj_set_size(cell->root, EV_CELL_W, EV_STRIP_H);
     lv_obj_set_style_radius(cell->root, 0, 0);
     lv_obj_set_style_bg_opa(cell->root, LV_OPA_0, 0);
     lv_obj_set_style_pad_all(cell->root, 0, 0);
-    lv_obj_set_style_transform_pivot_x(cell->root, EV_CELL_W / 2, 0);
-    lv_obj_set_style_transform_pivot_y(cell->root, EV_STRIP_H / 2, 0);
+    ev_disable_interaction(cell->root);
 
     cell->mark = ev_create_label(cell->root, "");
     lv_obj_set_style_text_font(cell->mark, ui_builtin_text_font(), 0);
@@ -823,7 +889,7 @@ static void ev_build_fades(lv_obj_t * parent)
 
     fade_left = lv_obj_create(parent);
     ev_reset_style(fade_left);
-    lv_obj_set_size(fade_left, 65, EV_STRIP_H);
+    lv_obj_set_size(fade_left, EV_FADE_W, EV_STRIP_H);
     lv_obj_set_style_bg_opa(fade_left, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_grad(fade_left, &ev_view.fade_left, 0);
     lv_obj_align(fade_left, LV_ALIGN_BOTTOM_LEFT, 0, EV_STRIP_Y);
@@ -831,7 +897,7 @@ static void ev_build_fades(lv_obj_t * parent)
 
     fade_right = lv_obj_create(parent);
     ev_reset_style(fade_right);
-    lv_obj_set_size(fade_right, 65, EV_STRIP_H);
+    lv_obj_set_size(fade_right, EV_FADE_W, EV_STRIP_H);
     lv_obj_set_style_bg_opa(fade_right, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_grad(fade_right, &ev_view.fade_right, 0);
     lv_obj_align(fade_right, LV_ALIGN_BOTTOM_RIGHT, 0, EV_STRIP_Y);
@@ -852,6 +918,7 @@ static void ev_build_touch_layer(lv_obj_t * parent)
     lv_obj_add_event_cb(ev_view.strip_touch, ev_strip_event_cb, LV_EVENT_PRESSING, NULL);
     lv_obj_add_event_cb(ev_view.strip_touch, ev_strip_event_cb, LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(ev_view.strip_touch, ev_strip_event_cb, LV_EVENT_PRESS_LOST, NULL);
+    lv_obj_add_event_cb(ev_view.strip_touch, ev_strip_event_cb, LV_EVENT_CANCEL, NULL);
 }
 
 static void ev_build_screen(void)
@@ -882,12 +949,25 @@ void ui_EventsScreen_init(void)
     lv_memzero(&ev_state, sizeof(ev_state));
     ev_init_gradients();
     ev_build_screen();
-    ev_refresh_view(true);
+    ev_view.date_timer = lv_timer_create(ev_date_timer_cb, EV_DATE_REFRESH_MS, NULL);
+    if(ev_view.date_timer) {
+        lv_timer_pause(ev_view.date_timer);
+    }
+    ev_refresh_view(false);
     app_screen_enable_swipe_back(ui_EventsScreen);
 }
 
 void ui_EventsScreen_deinit(void)
 {
+    if(ui_EventsScreen) {
+        lv_async_call_cancel(ev_enable_swipe_back_async, ui_EventsScreen);
+    }
+
+    if(ev_view.date_timer) {
+        lv_timer_delete(ev_view.date_timer);
+        ev_view.date_timer = NULL;
+    }
+
     if(ui_EventsScreen) {
         lv_obj_delete(ui_EventsScreen);
         ui_EventsScreen = NULL;

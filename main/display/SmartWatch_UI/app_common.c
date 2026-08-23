@@ -17,6 +17,7 @@ static uint8_t g_bar_count;
 static lv_obj_t * g_status_overlay_root;
 static app_status_bar_t g_status_overlay_bar;
 static bool g_status_overlay_inited;
+static bool g_status_overlay_visible = true;
 static bool g_touch_guard_pressing;
 static bool g_touch_guard_dragging;
 static bool g_touch_guard_release_was_drag;
@@ -152,10 +153,21 @@ static void touch_guard_indev_event_cb(lv_event_t * e)
             return;
 
         case LV_EVENT_PRESSING:
-        case LV_EVENT_PRESS_LOST:
             if(touch_guard_drag_threshold_reached(indev)) {
                 g_touch_guard_dragging = true;
             }
+            return;
+
+        case LV_EVENT_PRESS_LOST:
+        case LV_EVENT_CANCEL:
+            if(g_touch_guard_indev == indev) {
+                g_touch_guard_release_was_drag = g_touch_guard_dragging ||
+                                                 touch_guard_drag_threshold_reached(indev);
+                g_touch_guard_pressing = false;
+                g_touch_guard_dragging = false;
+                g_touch_guard_indev = NULL;
+            }
+            swipe_back_reset_state();
             return;
 
         case LV_EVENT_GESTURE:
@@ -402,7 +414,22 @@ void app_status_overlay_init(void)
     lv_obj_clear_flag(g_status_overlay_root, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
 
     app_status_bar_init(&g_status_overlay_bar, g_status_overlay_root);
+    if(!g_status_overlay_visible) {
+        lv_obj_add_flag(g_status_overlay_root, LV_OBJ_FLAG_HIDDEN);
+    }
     g_status_overlay_inited = true;
+}
+
+void app_status_overlay_set_visible(bool visible)
+{
+    g_status_overlay_visible = visible;
+    if(!g_status_overlay_root) return;
+
+    if(visible) {
+        lv_obj_remove_flag(g_status_overlay_root, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(g_status_overlay_root, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 void app_status_overlay_deinit(void)
@@ -414,6 +441,7 @@ void app_status_overlay_deinit(void)
         lv_obj_delete(g_status_overlay_root);
         g_status_overlay_root = NULL;
     }
+    g_status_overlay_visible = true;
     g_status_overlay_inited = false;
 }
 

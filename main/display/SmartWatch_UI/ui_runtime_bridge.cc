@@ -115,6 +115,19 @@ static void smartwatch_ui_runtime_wallpaper_detach_old_resources(void)
     ui_WallpaperScreen_release_preview_images();
 }
 
+/* The server's newest wallpaper set is the active draft until the user
+ * chooses another set in the wallpaper page. */
+static void smartwatch_ui_runtime_wallpaper_select_latest_preview(void)
+{
+    const uint8_t mode = g_wallpaper_preview_last_mode == 1 ? 1 : 0;
+    if (g_wallpaper_preview_images[mode].empty()) {
+        return;
+    }
+
+    g_wallpaper_config.mode = mode == 1 ? WALLPAPER_MODE_TRIPLE : WALLPAPER_MODE_SINGLE;
+    g_wallpaper_config.selected_index = 0;
+}
+
 static void smartwatch_ui_runtime_wallpaper_apply_remote_state(void)
 {
     smartwatch_ui_runtime_wallpaper_detach_old_resources();
@@ -138,6 +151,7 @@ static void smartwatch_ui_runtime_wallpaper_apply_remote_state(void)
     }
     g_wallpaper_preview_last_mode = store.GetLastMode();
     g_wallpaper_remote_preview_loaded = true;
+    smartwatch_ui_runtime_wallpaper_select_latest_preview();
 }
 
 static void smartwatch_ui_runtime_wallpaper_ensure_remote_state(void)
@@ -413,6 +427,22 @@ extern "C" void smartwatch_ui_runtime_wallpaper_clear(void)
 
 extern "C" void smartwatch_ui_runtime_wallpaper_reset(void)
 {
+    g_wallpaper_standby_refresh_pending = false;
+    if (g_wallpaper_standby_refresh_timer != nullptr) {
+        lv_timer_delete(g_wallpaper_standby_refresh_timer);
+        g_wallpaper_standby_refresh_timer = nullptr;
+    }
+    if (g_wallpaper_layer.root != nullptr && lv_obj_is_valid(g_wallpaper_layer.root)) {
+        /* Drop the image pointer before releasing the owning LvglImage data. */
+        lv_obj_set_style_bg_image_src(g_wallpaper_layer.root, nullptr, 0);
+    }
+    ui_WallpaperScreen_release_preview_images();
+    for (uint8_t mode = 0; mode < 2; ++mode) {
+        g_wallpaper_preview_images[mode].clear();
+        g_wallpaper_preview_interval_ms[mode] = 2000;
+    }
+    g_wallpaper_preview_last_mode = 0;
+    g_wallpaper_remote_preview_loaded = false;
     if (g_wallpaper_layer.root != nullptr && lv_obj_is_valid(g_wallpaper_layer.root)) {
         lv_obj_delete(g_wallpaper_layer.root);
     }
@@ -428,6 +458,7 @@ void smartwatch_ui_runtime_wallpaper_preview_set_images(std::vector<std::unique_
     g_wallpaper_preview_images[preview_mode] = std::move(images);
     g_wallpaper_preview_interval_ms[preview_mode] = interval_ms >= 500 ? interval_ms : 2000;
     g_wallpaper_preview_last_mode = preview_mode;
+    smartwatch_ui_runtime_wallpaper_select_latest_preview();
     ui_WallpaperScreen_reload_previews();
     smartwatch_ui_runtime_wallpaper_request_standby_refresh();
 }

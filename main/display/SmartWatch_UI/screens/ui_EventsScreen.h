@@ -1,6 +1,6 @@
 /**
  * @file ui_EventsScreen.h
- * @brief 事件提醒屏幕 - 日历日期选择、事件卡片列表
+ * @brief 日历屏幕 - 日期浏览、点击切换和拖动吸附
  */
 
 #ifndef UI_EVENTSSCREEN_H

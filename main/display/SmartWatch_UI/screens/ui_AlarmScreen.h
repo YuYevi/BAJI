@@ -14,6 +14,8 @@ extern "C" {
 
 extern lv_obj_t * ui_AlarmScreen;
 
+void ui_AlarmRuntime_init(void);
+void ui_AlarmRuntime_deinit(void);
 void ui_AlarmScreen_init(void);
 void ui_AlarmScreen_deinit(void);
 

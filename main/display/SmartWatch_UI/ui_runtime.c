@@ -97,6 +97,13 @@ void smartwatch_ui_runtime_init(void)
 {
     if(g_runtime_inited) return;
 
+    /* Keep rounded borders anti-aliased on RGB565 panels.  The LVGL default
+     * is enabled for 16-bit color, but set it before creating any UI because
+     * display ports may override the default during initialization. */
+    lv_display_t * display = lv_display_get_default();
+    if(display) {
+        lv_display_set_antialiasing(display, true);
+    }
     ui_init();
     ensure_toast_overlay(true);
     ensure_toast_overlay(false);

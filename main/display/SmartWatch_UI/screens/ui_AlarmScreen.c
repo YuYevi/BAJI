@@ -33,6 +33,7 @@ lv_obj_t * ui_AlarmScreen = NULL;
 #define ALARM_RING_REPEAT_COUNT       3U
 #define ALARM_RING_GAP_AFTER_PLAY_MS  5000U
 #define ALARM_RING_TIMER_STEP_MS      100U
+#define ALARM_RING_SOUND_START_TIMEOUT_MS 1500U
 #define ALARM_CD_ARC_SIZE             148
 #define ALARM_PANEL_TOP_Y             52
 #define ALARM_CARD_WIDTH              260
@@ -150,6 +151,8 @@ typedef struct {
     cd_state_t cd_state;
     int32_t cd_seconds;
     int32_t cd_total;
+    uint32_t cd_remaining_ms;
+    uint32_t cd_deadline_tick;
 
     bool editing_new;
     uint8_t editing_idx;
@@ -160,8 +163,9 @@ typedef struct {
     int32_t last_ring_minute_key;
     int32_t last_hint_minute_key;
 
-    lv_timer_t * housekeeping_timer;
-    lv_timer_t * ring_timer;
+    lv_timer_t * service_timer;
+    uint32_t alarm_generation;
+    bool runtime_initialized;
 
     uint32_t ring_wait_started_tick;
     uint8_t ring_play_count;
@@ -191,7 +195,11 @@ static void alarm_apply_countdown_state(void);
 static void alarm_update_countdown_total_label(void);
 static void alarm_stop_ring(void);
 static void alarm_hide_alert_popup(void);
+static void alarm_close_edit_panel(void);
 static void alarm_refresh_swipe_back_state(void);
+static void alarm_sync_items_if_changed(bool force);
+static void alarm_enable_press_glow(lv_obj_t * obj, lv_color_t color);
+static void alarm_start_countdown_deadline(uint32_t remaining_ms);
 static lv_obj_t * alarm_create_circle_button(lv_obj_t * parent,
                                              int32_t size,
                                              lv_color_t bg_color,
@@ -215,8 +223,7 @@ static void alarm_cd_start_cb(lv_event_t * e);
 static void alarm_cd_toggle_cb(lv_event_t * e);
 static void alarm_cd_reset_cb(lv_event_t * e);
 
-static void alarm_ring_timer_cb(lv_timer_t * timer);
-static void alarm_housekeeping_cb(lv_timer_t * timer);
+static void alarm_service_timer_cb(lv_timer_t * timer);
 
 /* ----------------------------- 通用工具 ----------------------------- */
 
@@ -334,6 +341,18 @@ static void alarm_save_items(void)
                                   g_alarm_state.items[i].on);
     }
     app_device_set_alarm_count(g_alarm_state.count);
+    g_alarm_state.alarm_generation = app_device_get_alarm_generation();
+}
+
+static void alarm_save_item(uint8_t idx)
+{
+    if(idx >= g_alarm_state.count) {
+        return;
+    }
+
+    const alarm_item_t * item = &g_alarm_state.items[idx];
+    app_device_set_alarm_item(idx, item->hour, item->minute, item->on);
+    g_alarm_state.alarm_generation = app_device_get_alarm_generation();
 }
 
 static void alarm_load_items(void)
@@ -365,6 +384,22 @@ static void alarm_load_items(void)
     }
 }
 
+static void alarm_sync_items_if_changed(bool force)
+{
+    uint32_t generation = app_device_get_alarm_generation();
+    if(!force && generation == g_alarm_state.alarm_generation) {
+        return;
+    }
+
+    alarm_load_items();
+    g_alarm_state.alarm_generation = app_device_get_alarm_generation();
+
+    if(g_alarm_view.list_cont) {
+        alarm_close_edit_panel();
+        alarm_rebuild_list();
+    }
+}
+
 static void alarm_add_item(uint8_t hour, uint8_t minute)
 {
     if(g_alarm_state.count >= ALARM_MAX_ITEMS) {
@@ -372,9 +407,12 @@ static void alarm_add_item(uint8_t hour, uint8_t minute)
         return;
     }
 
-    g_alarm_state.items[g_alarm_state.count] = (alarm_item_t){ hour, minute, true };
+    uint8_t idx = g_alarm_state.count;
+    g_alarm_state.items[idx] = (alarm_item_t){ hour, minute, true };
     g_alarm_state.count++;
-    alarm_save_items();
+    alarm_save_item(idx);
+    app_device_set_alarm_count(g_alarm_state.count);
+    g_alarm_state.alarm_generation = app_device_get_alarm_generation();
     alarm_rebuild_list();
 }
 
@@ -396,17 +434,17 @@ static void alarm_delete_item(uint8_t idx)
 
 static void alarm_hide_alert_popup(void)
 {
-    alarm_set_hidden(g_alarm_view.alert.overlay, true);
     g_alarm_state.alert_kind = ALARM_ALERT_NONE;
+    alarm_set_hidden(g_alarm_view.alert.overlay, true);
 }
 
 static void alarm_show_alert_popup(alarm_alert_kind_t kind, const char * title)
 {
+    g_alarm_state.alert_kind = kind;
     if(!g_alarm_view.alert.overlay) {
         return;
     }
 
-    g_alarm_state.alert_kind = kind;
     lv_label_set_text(g_alarm_view.alert.title, title ? title : "");
 
     if(kind == ALARM_ALERT_ALARM) {
@@ -419,6 +457,7 @@ static void alarm_show_alert_popup(alarm_alert_kind_t kind, const char * title)
         lv_obj_set_style_border_color(g_alarm_view.alert.right_btn, ALARM_AMBER, 0);
         lv_obj_set_style_border_opa(g_alarm_view.alert.right_btn, alarm_pct_opa(30), 0);
         lv_obj_set_style_text_color(g_alarm_view.alert.right_label, ALARM_CARD_ON_TEXT, 0);
+        alarm_enable_press_glow(g_alarm_view.alert.right_btn, ALARM_AMBER);
     } else {
         lv_label_set_text(g_alarm_view.alert.message, "是否重新开始本次倒计时");
         lv_label_set_text(g_alarm_view.alert.left_label, "重新开始");
@@ -429,6 +468,7 @@ static void alarm_show_alert_popup(alarm_alert_kind_t kind, const char * title)
         lv_obj_set_style_border_color(g_alarm_view.alert.right_btn, ALARM_RED, 0);
         lv_obj_set_style_border_opa(g_alarm_view.alert.right_btn, alarm_pct_opa(30), 0);
         lv_obj_set_style_text_color(g_alarm_view.alert.right_label, ALARM_RED, 0);
+        alarm_enable_press_glow(g_alarm_view.alert.right_btn, ALARM_RED);
     }
 
     alarm_set_hidden(g_alarm_view.alert.overlay, false);
@@ -442,10 +482,6 @@ static void alarm_schedule_snooze_10min(void)
 
 static void alarm_stop_ring(void)
 {
-    if(g_alarm_state.ring_timer) {
-        lv_timer_pause(g_alarm_state.ring_timer);
-    }
-
     if(g_alarm_state.ring_active) {
         smartwatch_ui_runtime_stop_sound();
     }
@@ -455,6 +491,11 @@ static void alarm_stop_ring(void)
     g_alarm_state.ring_play_count = 0;
     g_alarm_state.ring_waiting_for_sound_start = false;
     g_alarm_state.ring_waiting_for_sound_finish = false;
+
+    if(g_alarm_state.service_timer) {
+        lv_timer_set_period(g_alarm_state.service_timer, 1000);
+        lv_timer_reset(g_alarm_state.service_timer);
+    }
 }
 
 static void alarm_start_next_ring_playback(void)
@@ -465,28 +506,33 @@ static void alarm_start_next_ring_playback(void)
 
     smartwatch_ui_runtime_play_alarm_sound();
     g_alarm_state.ring_play_count++;
-    g_alarm_state.ring_wait_started_tick = 0;
+    g_alarm_state.ring_wait_started_tick = lv_tick_get();
     g_alarm_state.ring_waiting_for_sound_start = true;
     g_alarm_state.ring_waiting_for_sound_finish = false;
 }
 
-static void alarm_ring_timer_cb(lv_timer_t * timer)
+static void alarm_ring_service_step(void)
 {
-    (void)timer;
-
     if(!g_alarm_state.ring_active) {
-        if(g_alarm_state.ring_timer) {
-            lv_timer_pause(g_alarm_state.ring_timer);
-        }
         return;
     }
 
+    uint32_t now_tick = lv_tick_get();
     bool sound_idle = smartwatch_ui_runtime_is_sound_idle();
 
     if(g_alarm_state.ring_waiting_for_sound_start) {
         if(!sound_idle) {
             g_alarm_state.ring_waiting_for_sound_start = false;
             g_alarm_state.ring_waiting_for_sound_finish = true;
+        } else if(lv_tick_elaps(g_alarm_state.ring_wait_started_tick) >= ALARM_RING_SOUND_START_TIMEOUT_MS) {
+            /* 音频启动失败时也要退出等待，避免 100ms 定时器永久运行。 */
+            g_alarm_state.ring_waiting_for_sound_start = false;
+            if(g_alarm_state.ring_play_count >= ALARM_RING_REPEAT_COUNT) {
+                alarm_hide_alert_popup();
+                alarm_stop_ring();
+            } else {
+                g_alarm_state.ring_wait_started_tick = now_tick;
+            }
         }
         return;
     }
@@ -498,9 +544,16 @@ static void alarm_ring_timer_cb(lv_timer_t * timer)
                 alarm_hide_alert_popup();
                 alarm_stop_ring();
             } else {
-                g_alarm_state.ring_wait_started_tick = lv_tick_get();
+                g_alarm_state.ring_wait_started_tick = now_tick;
             }
         }
+        return;
+    }
+
+    if(!sound_idle) {
+        /* 兼容音频在启动超时之后才开始播放的情况。 */
+        g_alarm_state.ring_wait_started_tick = 0;
+        g_alarm_state.ring_waiting_for_sound_finish = true;
         return;
     }
 
@@ -519,10 +572,9 @@ static void alarm_play_ring(const char * text, alarm_alert_kind_t kind)
         ui_nav_push(&ui_AlarmScreen, LV_SCR_LOAD_ANIM_NONE, 0, 0);
     }
 
-    if(g_alarm_state.ring_timer) {
-        lv_timer_set_period(g_alarm_state.ring_timer, ALARM_RING_TIMER_STEP_MS);
-        lv_timer_resume(g_alarm_state.ring_timer);
-        lv_timer_reset(g_alarm_state.ring_timer);
+    if(g_alarm_state.service_timer) {
+        lv_timer_set_period(g_alarm_state.service_timer, ALARM_RING_TIMER_STEP_MS);
+        lv_timer_reset(g_alarm_state.service_timer);
     }
 
     if(text && text[0] != '\0') {
@@ -660,7 +712,7 @@ static void alarm_update_countdown_time_label(void)
     lv_obj_set_style_text_opa(g_alarm_view.cd.time_label,
                               g_alarm_state.cd_state == CD_PAUSED ? alarm_pct_opa(50) : LV_OPA_COVER,
                               0);
-    lv_obj_set_style_text_letter_space(g_alarm_view.cd.time_label, -2, 0);
+    lv_obj_set_style_text_letter_space(g_alarm_view.cd.time_label, 0, 0);
 }
 
 static void alarm_update_countdown_total_label(void)
@@ -694,6 +746,35 @@ static void alarm_update_countdown_progress(void)
         if(value > 100) value = 100;
     }
     lv_arc_set_value(g_alarm_view.cd.arc, value);
+}
+
+static void alarm_start_countdown_deadline(uint32_t remaining_ms)
+{
+    g_alarm_state.cd_remaining_ms = remaining_ms;
+    g_alarm_state.cd_deadline_tick = remaining_ms > 0 ? lv_tick_get() + remaining_ms : 0;
+    g_alarm_state.cd_seconds = (int32_t)((remaining_ms + 999U) / 1000U);
+}
+
+static bool alarm_update_countdown_from_clock(void)
+{
+    if(g_alarm_state.cd_state != CD_RUNNING) {
+        return false;
+    }
+
+    uint32_t now_tick = lv_tick_get();
+    int32_t delta = (int32_t)(g_alarm_state.cd_deadline_tick - now_tick);
+    uint32_t remaining_ms = delta > 0 ? (uint32_t)delta : 0U;
+    g_alarm_state.cd_remaining_ms = remaining_ms;
+    g_alarm_state.cd_seconds = (int32_t)((remaining_ms + 999U) / 1000U);
+
+    if(remaining_ms > 0) {
+        return false;
+    }
+
+    g_alarm_state.cd_deadline_tick = 0;
+    g_alarm_state.cd_seconds = 0;
+    g_alarm_state.cd_state = CD_DONE;
+    return true;
 }
 
 static void alarm_apply_countdown_state(void)
@@ -762,30 +843,29 @@ static void alarm_reset_countdown(bool clear_total)
 {
     g_alarm_state.cd_state = CD_IDLE;
     g_alarm_state.cd_seconds = 0;
+    g_alarm_state.cd_remaining_ms = 0;
+    g_alarm_state.cd_deadline_tick = 0;
     if(clear_total) {
         g_alarm_state.cd_total = 0;
     }
     alarm_apply_countdown_state();
 }
 
-static void alarm_housekeeping_cb(lv_timer_t * timer)
+static void alarm_service_timer_cb(lv_timer_t * timer)
 {
     (void)timer;
 
-    if(g_alarm_state.cd_state == CD_RUNNING) {
-        if(g_alarm_state.cd_seconds > 0) {
-            g_alarm_state.cd_seconds--;
-        }
-
-        if(g_alarm_state.cd_seconds <= 0) {
-            g_alarm_state.cd_seconds = 0;
-            g_alarm_state.cd_state = CD_DONE;
-            alarm_apply_countdown_state();
-            alarm_play_ring("倒计时结束", ALARM_ALERT_COUNTDOWN);
-        } else {
-            alarm_apply_countdown_state();
-        }
+    int32_t previous_seconds = g_alarm_state.cd_seconds;
+    if(alarm_update_countdown_from_clock()) {
+        alarm_apply_countdown_state();
+        alarm_play_ring("倒计时结束", ALARM_ALERT_COUNTDOWN);
+    } else if(g_alarm_state.cd_state == CD_RUNNING &&
+              g_alarm_state.cd_seconds != previous_seconds) {
+        alarm_apply_countdown_state();
     }
+
+    alarm_ring_service_step();
+    alarm_sync_items_if_changed(false);
 
     time_t now_ts = 0;
     struct tm now_tm;
@@ -880,6 +960,27 @@ static void alarm_anim_set_opa(lv_obj_t * obj, int32_t value)
     }
 }
 
+static void alarm_cancel_card_animations(void)
+{
+    for(uint8_t i = 0; i < ALARM_MAX_ITEMS; ++i) {
+        alarm_card_view_t * card = &g_alarm_view.cards[i];
+        if(!card->card && !card->row && !card->delete_btn) {
+            continue;
+        }
+
+        lv_anim_del(card, (lv_anim_exec_xcb_t)alarm_anim_set_card_offset);
+        if(card->row) {
+            lv_anim_del(card->row, (lv_anim_exec_xcb_t)alarm_anim_set_height);
+        }
+        if(card->card) {
+            lv_anim_del(card->card, (lv_anim_exec_xcb_t)alarm_anim_set_opa);
+        }
+        if(card->delete_btn) {
+            lv_anim_del(card->delete_btn, (lv_anim_exec_xcb_t)alarm_anim_set_opa);
+        }
+    }
+}
+
 static void alarm_close_expanded_card(bool anim);
 
 static void alarm_animate_card_offset(uint8_t idx, int32_t target, uint32_t time, bool overshoot)
@@ -960,6 +1061,7 @@ static void alarm_start_delete_anim(uint8_t idx)
 
     g_alarm_state.expanded_card_idx = -1;
     g_alarm_state.suppress_click_idx = -1;
+    alarm_refresh_swipe_back_state();
 
     lv_anim_del(card, (lv_anim_exec_xcb_t)alarm_anim_set_card_offset);
     lv_obj_add_flag(card->row, LV_OBJ_FLAG_CLICKABLE);
@@ -1014,7 +1116,7 @@ static void alarm_refresh_card(uint8_t idx)
     if(card->time_label) {
         lv_label_set_text(card->time_label, time_buf);
         lv_obj_set_style_text_color(card->time_label, item->on ? ALARM_CARD_ON_TEXT : ALARM_CARD_OFF_TEXT, 0);
-        lv_obj_set_style_text_opa(card->time_label, item->on ? LV_OPA_COVER : alarm_pct_opa(22), 0);
+        lv_obj_set_style_text_opa(card->time_label, item->on ? LV_OPA_COVER : alarm_pct_opa(52), 0);
     }
 
     if(card->card) {
@@ -1037,6 +1139,11 @@ static void alarm_refresh_card(uint8_t idx)
         lv_obj_set_style_bg_opa(card->toggle,
                                 item->on ? LV_OPA_COVER : alarm_pct_opa(10),
                                 LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(card->toggle, item->on ? ALARM_AMBER : lv_color_white(), LV_PART_INDICATOR | LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(card->toggle,
+                                item->on ? LV_OPA_COVER : alarm_pct_opa(10),
+                                LV_PART_INDICATOR | LV_STATE_PRESSED);
+        lv_obj_set_style_bg_color(card->toggle, lv_color_white(), LV_PART_KNOB | LV_STATE_PRESSED);
     }
 }
 
@@ -1063,6 +1170,7 @@ static void alarm_create_alarm_card(lv_obj_t * parent, uint8_t idx)
     lv_obj_set_style_border_opa(card->delete_btn, alarm_pct_opa(72), 0);
     lv_obj_set_style_shadow_width(card->delete_btn, 0, 0);
     lv_obj_add_event_cb(card->delete_btn, alarm_card_delete_event_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)idx);
+    alarm_enable_press_glow(card->delete_btn, ALARM_RED);
 
     card->delete_icon = alarm_create_label(card->delete_btn, LV_SYMBOL_TRASH, &lv_font_montserrat_14, lv_color_white(), LV_OPA_COVER);
     lv_obj_center(card->delete_icon);
@@ -1115,6 +1223,7 @@ static void alarm_create_alarm_card(lv_obj_t * parent, uint8_t idx)
     lv_obj_set_style_pad_all(card->toggle, 2, 0);
     lv_obj_set_style_radius(card->toggle, LV_RADIUS_CIRCLE, LV_PART_KNOB);
     lv_obj_add_event_cb(card->toggle, alarm_toggle_cb, LV_EVENT_VALUE_CHANGED, (void *)(uintptr_t)idx);
+    alarm_enable_press_glow(card->toggle, ALARM_AMBER);
 
     alarm_update_delete_btn_position(card);
     alarm_refresh_card(idx);
@@ -1126,6 +1235,7 @@ static void alarm_rebuild_list(void)
         return;
     }
 
+    alarm_cancel_card_animations();
     g_alarm_state.expanded_card_idx = -1;
     g_alarm_state.suppress_click_idx = -1;
     memset(g_alarm_view.cards, 0, sizeof(g_alarm_view.cards));
@@ -1139,7 +1249,29 @@ static void alarm_rebuild_list(void)
         alarm_create_alarm_card(g_alarm_view.list_cont, i);
     }
 
+    if(g_alarm_state.count == 0) {
+        lv_obj_t * empty = alarm_create_clean_container(g_alarm_view.list_cont);
+        lv_obj_set_size(empty, LV_PCT(100), 96);
+        lv_obj_set_style_pad_gap(empty, 7, 0);
+        lv_obj_set_flex_flow(empty, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(empty, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+        lv_obj_t * icon = alarm_create_label(empty,
+                                             LV_SYMBOL_BELL,
+                                             &lv_font_montserrat_14,
+                                             lv_color_white(),
+                                             alarm_pct_opa(24));
+        lv_obj_t * label = alarm_create_label(empty,
+                                              "暂无闹钟",
+                                              ui_builtin_text_font(),
+                                              lv_color_white(),
+                                              alarm_pct_opa(42));
+        alarm_make_passthrough(icon);
+        alarm_make_passthrough(label);
+    }
+
     app_swipe_back_refresh_subtree(g_alarm_view.list_cont);
+    alarm_refresh_swipe_back_state();
     alarm_refresh_next_hint();
 }
 
@@ -1194,9 +1326,11 @@ static void alarm_save_edit(void)
         alarm_add_item((uint8_t)hour, (uint8_t)minute);
     } else if(g_alarm_state.editing_idx < g_alarm_state.count) {
         alarm_item_t * item = &g_alarm_state.items[g_alarm_state.editing_idx];
-        item->hour = (uint8_t)hour;
-        item->minute = (uint8_t)minute;
-        alarm_save_items();
+        if(item->hour != (uint8_t)hour || item->minute != (uint8_t)minute) {
+            item->hour = (uint8_t)hour;
+            item->minute = (uint8_t)minute;
+            alarm_save_item(g_alarm_state.editing_idx);
+        }
         alarm_refresh_card(g_alarm_state.editing_idx);
         alarm_refresh_next_hint();
     }
@@ -1400,7 +1534,7 @@ static void alarm_toggle_cb(lv_event_t * e)
     g_alarm_state.items[idx].on = toggle && lv_obj_has_state(toggle, LV_STATE_CHECKED);
     alarm_refresh_card(idx);
     alarm_refresh_next_hint();
-    alarm_save_items();
+    alarm_save_item(idx);
 }
 
 static void alarm_card_delete_event_cb(lv_event_t * e)
@@ -1476,11 +1610,13 @@ static void alarm_alert_left_event_cb(lv_event_t * e)
         alarm_hide_alert_popup();
 
         if(g_alarm_state.cd_total > 0) {
-            g_alarm_state.cd_seconds = g_alarm_state.cd_total;
             g_alarm_state.cd_state = CD_RUNNING;
+            alarm_start_countdown_deadline((uint32_t)g_alarm_state.cd_total * 1000U);
         } else {
             g_alarm_state.cd_seconds = 0;
             g_alarm_state.cd_state = CD_IDLE;
+            g_alarm_state.cd_remaining_ms = 0;
+            g_alarm_state.cd_deadline_tick = 0;
         }
 
         alarm_apply_countdown_state();
@@ -1524,8 +1660,8 @@ static void alarm_cd_start_cb(lv_event_t * e)
     }
 
     g_alarm_state.cd_total = total;
-    g_alarm_state.cd_seconds = total;
     g_alarm_state.cd_state = CD_RUNNING;
+    alarm_start_countdown_deadline((uint32_t)total * 1000U);
     alarm_apply_countdown_state();
 }
 
@@ -1536,9 +1672,16 @@ static void alarm_cd_toggle_cb(lv_event_t * e)
     }
 
     if(g_alarm_state.cd_state == CD_RUNNING) {
+        alarm_update_countdown_from_clock();
+        if(g_alarm_state.cd_state != CD_RUNNING) {
+            alarm_apply_countdown_state();
+            return;
+        }
         g_alarm_state.cd_state = CD_PAUSED;
+        g_alarm_state.cd_deadline_tick = 0;
     } else if(g_alarm_state.cd_state == CD_PAUSED) {
         g_alarm_state.cd_state = CD_RUNNING;
+        alarm_start_countdown_deadline(g_alarm_state.cd_remaining_ms);
     }
 
     alarm_apply_countdown_state();
@@ -1568,6 +1711,7 @@ static lv_obj_t * alarm_create_roller(lv_obj_t * parent,
     lv_roller_set_selected(roller, selected, LV_ANIM_OFF);
     lv_roller_set_visible_row_count(roller, 5);
     lv_obj_set_style_width(roller, 68, 0);
+    /* 保留五行数字的原始显示密度，闹钟和倒计时选择器保持一致。 */
     lv_obj_set_style_height(roller, 200, 0);
     lv_obj_set_style_bg_color(roller, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(roller, alarm_pct_opa(6), 0);
@@ -1606,6 +1750,27 @@ static lv_obj_t * alarm_create_dots(lv_obj_t * parent, lv_color_t color)
     return dots;
 }
 
+static void alarm_enable_press_glow(lv_obj_t * obj, lv_color_t color)
+{
+    if(!obj) {
+        return;
+    }
+
+    lv_obj_set_style_outline_width(obj, 2, LV_STATE_PRESSED);
+    lv_obj_set_style_outline_pad(obj, 2, LV_STATE_PRESSED);
+    lv_obj_set_style_outline_color(obj, color, LV_STATE_PRESSED);
+    lv_obj_set_style_outline_opa(obj, alarm_pct_opa(72), LV_STATE_PRESSED);
+    lv_obj_set_style_shadow_width(obj, 10, LV_STATE_PRESSED);
+    lv_obj_set_style_shadow_spread(obj, 1, LV_STATE_PRESSED);
+    lv_obj_set_style_shadow_color(obj, color, LV_STATE_PRESSED);
+    lv_obj_set_style_shadow_opa(obj, alarm_pct_opa(38), LV_STATE_PRESSED);
+
+    lv_obj_t * parent = lv_obj_get_parent(obj);
+    if(parent) {
+        lv_obj_add_flag(parent, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    }
+}
+
 static lv_obj_t * alarm_create_circle_button(lv_obj_t * parent,
                                              int32_t size,
                                              lv_color_t bg_color,
@@ -1622,6 +1787,7 @@ static lv_obj_t * alarm_create_circle_button(lv_obj_t * parent,
     lv_obj_set_style_border_color(btn, border_color, 0);
     lv_obj_set_style_border_opa(btn, border_opa, 0);
     lv_obj_set_style_shadow_width(btn, 0, 0);
+    alarm_enable_press_glow(btn, border_color);
     return btn;
 }
 
@@ -1632,7 +1798,7 @@ static void alarm_build_tab_button(lv_obj_t * parent,
                                    uintptr_t user_data)
 {
     view->btn = alarm_create_clean_button(parent);
-    lv_obj_set_size(view->btn, 94, 34);
+    lv_obj_set_size(view->btn, 90, 32);
     lv_obj_set_ext_click_area(view->btn, 15);
     lv_obj_set_style_radius(view->btn, 999, 0);
     lv_obj_set_style_pad_hor(view->btn, 12, 0);
@@ -1642,6 +1808,7 @@ static void alarm_build_tab_button(lv_obj_t * parent,
     lv_obj_set_flex_align(view->btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_add_flag(view->btn, LV_OBJ_FLAG_PRESS_LOCK);
     lv_obj_add_event_cb(view->btn, alarm_tab_event_cb, LV_EVENT_CLICKED, (void *)user_data);
+    alarm_enable_press_glow(view->btn, user_data == 0 ? ALARM_AMBER : ALARM_TEAL);
 
     view->icon = alarm_create_label(view->btn, icon_text, LV_FONT_DEFAULT, lv_color_white(), LV_OPA_COVER);
     view->label = alarm_create_label(view->btn, text, ui_builtin_text_font(), lv_color_white(), LV_OPA_COVER);
@@ -1706,8 +1873,9 @@ static void alarm_build_alarm_content(void)
     g_alarm_view.next_label = alarm_create_label(g_alarm_view.next_pill, "", ui_builtin_text_font(), ALARM_CARD_ON_TEXT, alarm_pct_opa(75));
 
     g_alarm_view.list_cont = alarm_create_clean_container(g_alarm_view.alarm_cont);
-    lv_obj_set_size(g_alarm_view.list_cont, LV_PCT(100), 200);
-    lv_obj_align(g_alarm_view.list_cont, LV_ALIGN_TOP_MID, 0, 130);
+    /* 54px 卡片 x 3 + 两个 8px 间距，完整显示三条且不覆盖新增按钮。 */
+    lv_obj_set_size(g_alarm_view.list_cont, LV_PCT(100), 180);
+    lv_obj_align(g_alarm_view.list_cont, LV_ALIGN_TOP_MID, 0, 124);
     lv_obj_set_style_pad_hor(g_alarm_view.list_cont, 28, 0);
     lv_obj_set_style_pad_gap(g_alarm_view.list_cont, 8, 0);
     lv_obj_set_flex_flow(g_alarm_view.list_cont, LV_FLEX_FLOW_COLUMN);
@@ -1720,12 +1888,12 @@ static void alarm_build_alarm_content(void)
     lv_obj_add_event_cb(g_alarm_view.list_cont, alarm_blank_area_click_cb, LV_EVENT_CLICKED, NULL);
 
     g_alarm_view.fab_btn = alarm_create_circle_button(ui_AlarmScreen,
-                                                      52,
+                                                      44,
                                                       ALARM_AMBER,
                                                       LV_OPA_COVER,
                                                       ALARM_AMBER,
                                                       alarm_pct_opa(60));
-    lv_obj_align(g_alarm_view.fab_btn, LV_ALIGN_BOTTOM_MID, 0, -28);
+    lv_obj_align(g_alarm_view.fab_btn, LV_ALIGN_BOTTOM_MID, 0, -6);
     lv_obj_add_event_cb(g_alarm_view.fab_btn, alarm_fab_event_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t * fab_icon = alarm_create_label(g_alarm_view.fab_btn, LV_SYMBOL_PLUS, &lv_font_montserrat_24, lv_color_hex(0x1a0a00), LV_OPA_COVER);
@@ -1739,16 +1907,15 @@ static void alarm_build_timer_content(void)
     lv_obj_set_size(g_alarm_view.timer_cont, LV_HOR_RES, LV_VER_RES);
     lv_obj_set_pos(g_alarm_view.timer_cont, 0, 0);
     lv_obj_set_style_pad_all(g_alarm_view.timer_cont, 0, 0);
-    lv_obj_set_flex_flow(g_alarm_view.timer_cont, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(g_alarm_view.timer_cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_add_flag(g_alarm_view.timer_cont, LV_OBJ_FLAG_GESTURE_BUBBLE);
 
     g_alarm_view.cd.idle_cont = alarm_create_clean_container(g_alarm_view.timer_cont);
-    lv_obj_set_size(g_alarm_view.cd.idle_cont, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_size(g_alarm_view.cd.idle_cont, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_pos(g_alarm_view.cd.idle_cont, 0, 0);
 
     lv_obj_t * pickers_row = alarm_create_clean_container(g_alarm_view.cd.idle_cont);
     lv_obj_set_size(pickers_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_align(pickers_row, LV_ALIGN_CENTER, 0, 15);
+    lv_obj_align(pickers_row, LV_ALIGN_TOP_MID, 0, 92);
     lv_obj_set_style_pad_gap(pickers_row, 8, 0);
     lv_obj_set_flex_flow(pickers_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(pickers_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -1758,8 +1925,8 @@ static void alarm_build_timer_content(void)
     g_alarm_view.cd.roller_sec = alarm_create_roller(pickers_row, ALARM_MIN_SEC_OPTIONS_60, 0, ALARM_TEAL);
 
     g_alarm_view.cd.start_btn = alarm_create_clean_button(g_alarm_view.cd.idle_cont);
-    lv_obj_set_size(g_alarm_view.cd.start_btn, 110, 38);
-    lv_obj_align_to(g_alarm_view.cd.start_btn, pickers_row, LV_ALIGN_OUT_BOTTOM_MID, 0, 140);
+    lv_obj_set_size(g_alarm_view.cd.start_btn, 108, 38);
+    lv_obj_align_to(g_alarm_view.cd.start_btn, pickers_row, LV_ALIGN_OUT_BOTTOM_MID, 0, 18);
     lv_obj_set_style_radius(g_alarm_view.cd.start_btn, 19, 0);
     lv_obj_set_style_bg_color(g_alarm_view.cd.start_btn, ALARM_TEAL, 0);
     lv_obj_set_style_bg_opa(g_alarm_view.cd.start_btn, LV_OPA_COVER, 0);
@@ -1770,6 +1937,7 @@ static void alarm_build_timer_content(void)
     lv_obj_set_flex_flow(g_alarm_view.cd.start_btn, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(g_alarm_view.cd.start_btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_add_event_cb(g_alarm_view.cd.start_btn, alarm_cd_start_cb, LV_EVENT_CLICKED, NULL);
+    alarm_enable_press_glow(g_alarm_view.cd.start_btn, ALARM_TEAL);
 
     g_alarm_view.cd.start_icon = alarm_create_label(g_alarm_view.cd.start_btn, LV_SYMBOL_PLAY, &lv_font_montserrat_14, lv_color_white(), LV_OPA_COVER);
     g_alarm_view.cd.start_label = alarm_create_label(g_alarm_view.cd.start_btn, "开始", ui_builtin_text_font(), lv_color_white(), LV_OPA_COVER);
@@ -1777,13 +1945,12 @@ static void alarm_build_timer_content(void)
     alarm_make_passthrough(g_alarm_view.cd.start_label);
 
     g_alarm_view.cd.running_cont = alarm_create_clean_container(g_alarm_view.timer_cont);
-    lv_obj_set_size(g_alarm_view.cd.running_cont, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_style_pad_top(g_alarm_view.cd.running_cont, 60, 0);
-    lv_obj_set_flex_flow(g_alarm_view.cd.running_cont, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(g_alarm_view.cd.running_cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_size(g_alarm_view.cd.running_cont, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_pos(g_alarm_view.cd.running_cont, 0, 0);
 
     lv_obj_t * arc_cont = alarm_create_clean_container(g_alarm_view.cd.running_cont);
     lv_obj_set_size(arc_cont, ALARM_CD_ARC_SIZE, ALARM_CD_ARC_SIZE);
+    lv_obj_align(arc_cont, LV_ALIGN_TOP_MID, 0, 104);
 
     g_alarm_view.cd.arc = lv_arc_create(arc_cont);
     lv_obj_remove_style_all(g_alarm_view.cd.arc);
@@ -1792,10 +1959,10 @@ static void alarm_build_timer_content(void)
     lv_arc_set_bg_angles(g_alarm_view.cd.arc, 0, 360);
     lv_arc_set_rotation(g_alarm_view.cd.arc, 270);
     lv_arc_set_value(g_alarm_view.cd.arc, 0);
-    lv_obj_set_style_arc_width(g_alarm_view.cd.arc, 1, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(g_alarm_view.cd.arc, 3, LV_PART_MAIN);
     lv_obj_set_style_arc_color(g_alarm_view.cd.arc, lv_color_white(), LV_PART_MAIN);
     lv_obj_set_style_arc_opa(g_alarm_view.cd.arc, alarm_pct_opa(22), LV_PART_MAIN);
-    lv_obj_set_style_arc_width(g_alarm_view.cd.arc, 1, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(g_alarm_view.cd.arc, 3, LV_PART_INDICATOR);
     lv_obj_set_style_arc_rounded(g_alarm_view.cd.arc, true, LV_PART_INDICATOR);
     lv_obj_center(g_alarm_view.cd.arc);
     lv_obj_clear_flag(g_alarm_view.cd.arc, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
@@ -1810,16 +1977,16 @@ static void alarm_build_timer_content(void)
     g_alarm_view.cd.time_label = alarm_create_label(text_cont, "00:00", &lv_font_montserrat_44, lv_color_white(), LV_OPA_COVER);
     lv_obj_set_width(g_alarm_view.cd.time_label, LV_PCT(100));
     lv_obj_set_style_text_align(g_alarm_view.cd.time_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_letter_space(g_alarm_view.cd.time_label, -2, 0);
+    lv_obj_set_style_text_letter_space(g_alarm_view.cd.time_label, 0, 0);
 
     g_alarm_view.cd.status_label = alarm_create_label(text_cont, "", ui_builtin_text_font(), lv_color_white(), alarm_pct_opa(28));
     lv_obj_set_width(g_alarm_view.cd.status_label, LV_PCT(100));
     lv_obj_set_style_text_align(g_alarm_view.cd.status_label, LV_TEXT_ALIGN_CENTER, 0);
 
     lv_obj_t * controls = alarm_create_clean_container(g_alarm_view.cd.running_cont);
-    lv_obj_set_size(controls, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_size(controls, 112, 48);
+    lv_obj_align(controls, LV_ALIGN_TOP_MID, 0, 266);
     lv_obj_set_style_pad_gap(controls, 14, 0);
-    lv_obj_set_style_pad_top(controls, 14, 0);
     lv_obj_set_flex_flow(controls, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(controls, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
@@ -1846,7 +2013,7 @@ static void alarm_build_timer_content(void)
     alarm_make_passthrough(g_alarm_view.cd.play_icon);
 
     g_alarm_view.cd.total_label = alarm_create_label(g_alarm_view.cd.running_cont, "", ui_builtin_text_font(), lv_color_white(), alarm_pct_opa(20));
-    lv_obj_set_style_pad_top(g_alarm_view.cd.total_label, 8, 0);
+    lv_obj_align(g_alarm_view.cd.total_label, LV_ALIGN_TOP_MID, 0, 320);
 }
 
 static void alarm_build_edit_panel(void)
@@ -1968,6 +2135,7 @@ static void alarm_build_alert_overlay(void)
     lv_obj_set_style_border_color(g_alarm_view.alert.left_btn, lv_color_white(), 0);
     lv_obj_set_style_border_opa(g_alarm_view.alert.left_btn, alarm_pct_opa(12), 0);
     lv_obj_add_event_cb(g_alarm_view.alert.left_btn, alarm_alert_left_event_cb, LV_EVENT_CLICKED, NULL);
+    alarm_enable_press_glow(g_alarm_view.alert.left_btn, lv_color_white());
 
     g_alarm_view.alert.left_label = alarm_create_label(g_alarm_view.alert.left_btn, "停止", ui_builtin_text_font(), lv_color_white(), alarm_pct_opa(70));
     lv_obj_center(g_alarm_view.alert.left_label);
@@ -1983,6 +2151,7 @@ static void alarm_build_alert_overlay(void)
     lv_obj_set_style_border_color(g_alarm_view.alert.right_btn, ALARM_AMBER, 0);
     lv_obj_set_style_border_opa(g_alarm_view.alert.right_btn, alarm_pct_opa(30), 0);
     lv_obj_add_event_cb(g_alarm_view.alert.right_btn, alarm_alert_right_event_cb, LV_EVENT_CLICKED, NULL);
+    alarm_enable_press_glow(g_alarm_view.alert.right_btn, ALARM_AMBER);
 
     g_alarm_view.alert.right_label = alarm_create_label(g_alarm_view.alert.right_btn, "稍后提醒", ui_builtin_text_font(), ALARM_CARD_ON_TEXT, LV_OPA_COVER);
     lv_obj_center(g_alarm_view.alert.right_label);
@@ -1991,23 +2160,56 @@ static void alarm_build_alert_overlay(void)
 
 /* ----------------------------- 生命周期 ----------------------------- */
 
-void ui_AlarmScreen_init(void)
+void ui_AlarmRuntime_init(void)
 {
-    if(ui_AlarmScreen) {
+    if(g_alarm_state.runtime_initialized) {
         return;
     }
 
-    memset(&g_alarm_view, 0, sizeof(g_alarm_view));
     memset(&g_alarm_state, 0, sizeof(g_alarm_state));
-
     g_alarm_state.tab = 0;
     g_alarm_state.cd_state = CD_IDLE;
     g_alarm_state.last_ring_minute_key = -1;
     g_alarm_state.last_hint_minute_key = -1;
     g_alarm_state.expanded_card_idx = -1;
     g_alarm_state.suppress_click_idx = -1;
+    g_alarm_state.runtime_initialized = true;
 
     alarm_load_items();
+    g_alarm_state.alarm_generation = app_device_get_alarm_generation();
+    g_alarm_state.service_timer = lv_timer_create(alarm_service_timer_cb, 1000, NULL);
+}
+
+void ui_AlarmRuntime_deinit(void)
+{
+    if(!g_alarm_state.runtime_initialized) {
+        return;
+    }
+
+    alarm_stop_ring();
+    if(g_alarm_state.service_timer) {
+        lv_timer_delete(g_alarm_state.service_timer);
+        g_alarm_state.service_timer = NULL;
+    }
+
+    memset(&g_alarm_state, 0, sizeof(g_alarm_state));
+    g_alarm_state.last_ring_minute_key = -1;
+    g_alarm_state.last_hint_minute_key = -1;
+    g_alarm_state.expanded_card_idx = -1;
+    g_alarm_state.suppress_click_idx = -1;
+}
+
+void ui_AlarmScreen_init(void)
+{
+    if(ui_AlarmScreen) {
+        return;
+    }
+
+    ui_AlarmRuntime_init();
+    memset(&g_alarm_view, 0, sizeof(g_alarm_view));
+    g_alarm_state.expanded_card_idx = -1;
+    g_alarm_state.suppress_click_idx = -1;
+    alarm_sync_items_if_changed(false);
 
     ui_AlarmScreen = lv_obj_create(NULL);
     g_alarm_view.root = ui_AlarmScreen;
@@ -2026,21 +2228,15 @@ void ui_AlarmScreen_init(void)
     alarm_build_edit_panel();
     alarm_build_alert_overlay();
 
-    g_alarm_state.housekeeping_timer = lv_timer_create(alarm_housekeeping_cb, 1000, NULL);
-    g_alarm_state.ring_timer = lv_timer_create(alarm_ring_timer_cb, ALARM_RING_TIMER_STEP_MS, NULL);
-    lv_timer_pause(g_alarm_state.ring_timer);
-
     alarm_rebuild_list();
     alarm_apply_countdown_state();
     alarm_apply_tab_style();
     alarm_refresh_next_hint();
 
-    /* 初始化时立即轮询一次，避免正好进入页面时漏掉当前分钟的提醒。 */
-    time_t now_ts = 0;
-    struct tm now_tm;
-    if(alarm_get_now(&now_ts, &now_tm)) {
-        g_alarm_state.last_hint_minute_key = alarm_get_minute_key(&now_tm);
-        alarm_check_due_alarms(now_ts, &now_tm);
+    if(g_alarm_state.ring_active && g_alarm_state.alert_kind != ALARM_ALERT_NONE) {
+        alarm_show_alert_popup(g_alarm_state.alert_kind,
+                               g_alarm_state.alert_kind == ALARM_ALERT_ALARM ?
+                                   "闹钟响了" : "倒计时结束");
     }
 
     app_screen_enable_swipe_back(ui_AlarmScreen);
@@ -2048,26 +2244,13 @@ void ui_AlarmScreen_init(void)
 
 void ui_AlarmScreen_deinit(void)
 {
-    alarm_stop_ring();
-
-    if(g_alarm_state.housekeeping_timer) {
-        lv_timer_delete(g_alarm_state.housekeeping_timer);
-        g_alarm_state.housekeeping_timer = NULL;
-    }
-    if(g_alarm_state.ring_timer) {
-        lv_timer_delete(g_alarm_state.ring_timer);
-        g_alarm_state.ring_timer = NULL;
-    }
-
+    alarm_cancel_card_animations();
     if(ui_AlarmScreen) {
         lv_obj_delete(ui_AlarmScreen);
         ui_AlarmScreen = NULL;
     }
 
     memset(&g_alarm_view, 0, sizeof(g_alarm_view));
-    memset(&g_alarm_state, 0, sizeof(g_alarm_state));
-    g_alarm_state.last_ring_minute_key = -1;
-    g_alarm_state.last_hint_minute_key = -1;
     g_alarm_state.expanded_card_idx = -1;
     g_alarm_state.suppress_click_idx = -1;
 }

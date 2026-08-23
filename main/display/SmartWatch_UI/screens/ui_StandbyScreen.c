@@ -43,6 +43,71 @@ static lv_point_t standby_press_start;
 static wallpaper_mode_t standby_current_mode = WALLPAPER_MODE_TRIPLE;
 static const uint32_t kStandbyCarouselIntervalMs = 2000;
 
+#define STANDBY_SWIPE_TRIGGER_PX  40
+#define STANDBY_WAKE_BUTTON_WIDTH  104
+#define STANDBY_WAKE_BUTTON_HEIGHT 42
+
+static lv_opa_t standby_wake_border_opa_idle(void)
+{
+    return (lv_opa_t)(LV_OPA_COVER * 30 / 100);
+}
+
+static lv_opa_t standby_wake_border_opa_pressed(void)
+{
+    return (lv_opa_t)(LV_OPA_COVER * 80 / 100);
+}
+
+static lv_opa_t standby_wake_glow_opa_idle(void)
+{
+    return (lv_opa_t)(LV_OPA_COVER * 12 / 100);
+}
+
+static lv_opa_t standby_wake_glow_opa_pressed(void)
+{
+    return (lv_opa_t)(LV_OPA_COVER * 42 / 100);
+}
+
+static void standby_set_border_opa(void * obj, int32_t value)
+{
+    if(!obj) return;
+    lv_obj_set_style_border_opa((lv_obj_t *)obj, (lv_opa_t)value, 0);
+}
+
+static void standby_set_shadow_opa(void * obj, int32_t value)
+{
+    if(!obj) return;
+    lv_obj_set_style_shadow_opa((lv_obj_t *)obj, (lv_opa_t)value, 0);
+}
+
+static void standby_start_anim(lv_obj_t * obj,
+                               lv_anim_exec_xcb_t exec_cb,
+                               int32_t from,
+                               int32_t to,
+                               uint32_t duration)
+{
+    if(!obj || !exec_cb) return;
+
+    lv_anim_del(obj, exec_cb);
+
+    lv_anim_t anim;
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, obj);
+    lv_anim_set_values(&anim, from, to);
+    lv_anim_set_time(&anim, duration);
+    lv_anim_set_exec_cb(&anim, exec_cb);
+    lv_anim_start(&anim);
+}
+
+static void standby_reset_wake_button_visual(void)
+{
+    if(!standby_wake_btn) return;
+
+    lv_anim_del(standby_wake_btn, (lv_anim_exec_xcb_t)standby_set_border_opa);
+    lv_anim_del(standby_wake_btn, (lv_anim_exec_xcb_t)standby_set_shadow_opa);
+    standby_set_border_opa(standby_wake_btn, standby_wake_border_opa_idle());
+    standby_set_shadow_opa(standby_wake_btn, standby_wake_glow_opa_idle());
+}
+
 static uint32_t standby_carousel_interval_ms(wallpaper_mode_t mode)
 {
     if(mode == WALLPAPER_MODE_TRIPLE &&
@@ -193,7 +258,7 @@ static void standby_go_chat(void)
 
 static void standby_swipe_overlay_set_progress(int32_t dy)
 {
-    int32_t p = (-dy * 100) / 90;
+    int32_t p = (-dy * 100) / STANDBY_SWIPE_TRIGGER_PX;
     if(p < 0) p = 0;
     if(p > 100) p = 100;
 
@@ -202,10 +267,38 @@ static void standby_swipe_overlay_set_progress(int32_t dy)
     else lv_obj_add_flag(standby_swipe_check, LV_OBJ_FLAG_HIDDEN);
 }
 
+static void standby_clear_swipe_feedback(void)
+{
+    if(standby_swipe_overlay) {
+        lv_obj_add_flag(standby_swipe_overlay, LV_OBJ_FLAG_HIDDEN);
+    }
+    if(standby_swipe_check) {
+        lv_obj_add_flag(standby_swipe_check, LV_OBJ_FLAG_HIDDEN);
+    }
+    if(standby_swipe_arc) {
+        lv_arc_set_value(standby_swipe_arc, 0);
+    }
+}
+
+static void standby_reset_interaction_state(void)
+{
+    standby_pressing = false;
+    standby_clear_swipe_feedback();
+    standby_reset_wake_button_visual();
+}
+
 static void standby_root_event_cb(lv_event_t * e)
 {
     lv_event_code_t code = lv_event_get_code(e);
-    lv_indev_t * indev = lv_indev_get_act();
+
+    if(code == LV_EVENT_CANCEL || code == LV_EVENT_PRESS_LOST) {
+        standby_reset_interaction_state();
+        standby_update_carousel_timer();
+        return;
+    }
+
+    lv_indev_t * indev = lv_event_get_indev(e);
+    if(!indev) indev = lv_indev_get_act();
     if(!indev) return;
 
     lv_obj_t * target = (lv_obj_t *)lv_event_get_target(e);
@@ -218,9 +311,7 @@ static void standby_root_event_cb(lv_event_t * e)
         standby_pressing = true;
         standby_update_carousel_timer();
         lv_indev_get_point(indev, &standby_press_start);
-        lv_obj_add_flag(standby_swipe_overlay, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(standby_swipe_check, LV_OBJ_FLAG_HIDDEN);
-        lv_arc_set_value(standby_swipe_arc, 0);
+        standby_clear_swipe_feedback();
         return;
     }
 
@@ -235,28 +326,22 @@ static void standby_root_event_cb(lv_event_t * e)
             standby_swipe_overlay_set_progress(dy);
         }
         else {
-            lv_obj_add_flag(standby_swipe_overlay, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(standby_swipe_check, LV_OBJ_FLAG_HIDDEN);
-            lv_arc_set_value(standby_swipe_arc, 0);
+            standby_clear_swipe_feedback();
         }
         return;
     }
 
-    if(code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-        standby_pressing = false;
-        standby_update_carousel_timer();
-
+    if(code == LV_EVENT_RELEASED) {
         lv_point_t p;
         lv_indev_get_point(indev, &p);
         int32_t dx = p.x - standby_press_start.x;
         int32_t dy = p.y - standby_press_start.y;
 
-        lv_obj_add_flag(standby_swipe_overlay, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(standby_swipe_check, LV_OBJ_FLAG_HIDDEN);
-        lv_arc_set_value(standby_swipe_arc, 0);
+        standby_reset_interaction_state();
+        standby_update_carousel_timer();
 
         if(LV_ABS(dy) > LV_ABS(dx)) {
-            if(dy < -20) {
+            if(dy <= -STANDBY_SWIPE_TRIGGER_PX) {
                 standby_go_home();
                 return;
             }
@@ -276,17 +361,54 @@ static void standby_root_event_cb(lv_event_t * e)
 
 static void standby_wake_btn_event_cb(lv_event_t * e)
 {
-    if(lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    standby_go_chat();
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_obj_t * button = lv_event_get_current_target(e);
+
+    if(!button) return;
+
+    if(code == LV_EVENT_PRESSED) {
+        standby_start_anim(button,
+                           (lv_anim_exec_xcb_t)standby_set_border_opa,
+                           lv_obj_get_style_border_opa(button, LV_PART_MAIN),
+                           standby_wake_border_opa_pressed(),
+                           90);
+        standby_start_anim(button,
+                           (lv_anim_exec_xcb_t)standby_set_shadow_opa,
+                           lv_obj_get_style_shadow_opa(button, LV_PART_MAIN),
+                           standby_wake_glow_opa_pressed(),
+                           90);
+        return;
+    }
+
+    if(code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST || code == LV_EVENT_CANCEL) {
+        standby_start_anim(button,
+                           (lv_anim_exec_xcb_t)standby_set_border_opa,
+                           lv_obj_get_style_border_opa(button, LV_PART_MAIN),
+                           standby_wake_border_opa_idle(),
+                           120);
+        standby_start_anim(button,
+                           (lv_anim_exec_xcb_t)standby_set_shadow_opa,
+                           lv_obj_get_style_shadow_opa(button, LV_PART_MAIN),
+                           standby_wake_glow_opa_idle(),
+                           120);
+        return;
+    }
+
+    if(code == LV_EVENT_CLICKED) {
+        standby_reset_wake_button_visual();
+        standby_go_chat();
+    }
 }
 
 static void standby_screen_event_cb(lv_event_t * e)
 {
     lv_event_code_t code = lv_event_get_code(e);
     if(code == LV_EVENT_SCREEN_LOADED) {
+        standby_reset_interaction_state();
         ui_StandbyScreen_apply_wallpaper();
     }
     else if(code == LV_EVENT_SCREEN_UNLOADED) {
+        standby_reset_interaction_state();
         standby_update_carousel_timer();
         smartwatch_ui_runtime_wallpaper_set_visible(false);
     }
@@ -302,9 +424,9 @@ void ui_StandbyScreen_apply_wallpaper(void)
     if(count == 0) count = 1;
     if(idx >= count) idx = 0;
     standby_current_mode = mode;
-    standby_rebuild_dots(mode == WALLPAPER_MODE_SINGLE || count <= 1 ? 0 : count);
 
     if(mode == WALLPAPER_MODE_SINGLE || count <= 1) {
+        standby_rebuild_dots(0);
         standby_wallpaper_apply(mode, idx);
         lv_obj_add_flag(standby_dots_cont, LV_OBJ_FLAG_HIDDEN);
 
@@ -335,7 +457,9 @@ void ui_StandbyScreen_init(void) {
 
     standby_wallpaper_index = 0;
     standby_carousel_timer = lv_timer_create(standby_carousel_timer_cb, kStandbyCarouselIntervalMs, NULL);
-    lv_timer_pause(standby_carousel_timer);
+    if(standby_carousel_timer) {
+        lv_timer_pause(standby_carousel_timer);
+    }
 
     standby_dots_cont = lv_obj_create(ui_StandbyScreen);
     lv_obj_remove_style_all(standby_dots_cont);
@@ -383,13 +507,19 @@ void ui_StandbyScreen_init(void) {
 
     standby_wake_btn = lv_btn_create(ui_StandbyScreen);
     lv_obj_remove_style_all(standby_wake_btn);
-    lv_obj_set_size(standby_wake_btn, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_style_radius(standby_wake_btn, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_size(standby_wake_btn, STANDBY_WAKE_BUTTON_WIDTH, STANDBY_WAKE_BUTTON_HEIGHT);
+    lv_obj_set_style_radius(standby_wake_btn, STANDBY_WAKE_BUTTON_HEIGHT / 2, 0);
     lv_obj_set_style_bg_color(standby_wake_btn, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(standby_wake_btn, (lv_opa_t)(LV_OPA_COVER * 2 / 5), 0);
-    lv_obj_set_style_border_width(standby_wake_btn, 1, 0);
-    lv_obj_set_style_border_color(standby_wake_btn, lv_color_white(), 0);
-    lv_obj_set_style_border_opa(standby_wake_btn, (lv_opa_t)(LV_OPA_COVER / 5), 0);
+    lv_obj_set_style_bg_opa(standby_wake_btn, (lv_opa_t)(LV_OPA_COVER * 55 / 100), 0);
+    lv_obj_set_style_border_width(standby_wake_btn, 2, 0);
+    lv_obj_set_style_border_color(standby_wake_btn, lv_color_hex(0xf9a8d4), 0);
+    lv_obj_set_style_border_opa(standby_wake_btn, standby_wake_border_opa_idle(), 0);
+    lv_obj_set_style_shadow_width(standby_wake_btn, 16, 0);
+    lv_obj_set_style_shadow_color(standby_wake_btn, lv_color_hex(0xf472b6), 0);
+    lv_obj_set_style_shadow_opa(standby_wake_btn, standby_wake_glow_opa_idle(), 0);
+    lv_obj_set_style_shadow_spread(standby_wake_btn, 0, 0);
+    lv_obj_set_style_shadow_ofs_x(standby_wake_btn, 0, 0);
+    lv_obj_set_style_shadow_ofs_y(standby_wake_btn, 0, 0);
     lv_obj_set_style_pad_hor(standby_wake_btn, 20, 0);
     lv_obj_set_style_pad_ver(standby_wake_btn, 10, 0);
     lv_obj_set_style_pad_gap(standby_wake_btn, 8, 0);
@@ -397,14 +527,18 @@ void ui_StandbyScreen_init(void) {
     lv_obj_set_flex_align(standby_wake_btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_align(standby_wake_btn, LV_ALIGN_BOTTOM_MID, 0, -40);
     lv_obj_remove_flag(standby_wake_btn, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_event_cb(standby_wake_btn, standby_wake_btn_event_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(standby_wake_btn, standby_wake_btn_event_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(standby_wake_btn, standby_wake_btn_event_cb, LV_EVENT_PRESS_LOST, NULL);
+    lv_obj_add_event_cb(standby_wake_btn, standby_wake_btn_event_cb, LV_EVENT_CANCEL, NULL);
     lv_obj_add_event_cb(standby_wake_btn, standby_wake_btn_event_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t * wake_icon = lv_image_create(standby_wake_btn);
     lv_image_set_src(wake_icon, &microphone);
-    lv_obj_set_size(wake_icon, 14, 14);
+    lv_obj_set_size(wake_icon, 16, 16);
     lv_image_set_inner_align(wake_icon, LV_IMAGE_ALIGN_CENTER);
-    lv_image_set_scale(wake_icon, 288);
-    lv_image_set_antialias(wake_icon, true);
+    lv_image_set_scale(wake_icon, LV_SCALE_NONE);
+    lv_image_set_antialias(wake_icon, false);
     lv_obj_set_style_image_recolor(wake_icon, lv_color_hex(0xf9a8d4), 0);
     lv_obj_set_style_image_recolor_opa(wake_icon, LV_OPA_COVER, 0);
     ui_make_decor_hit_passthrough(wake_icon);
@@ -412,7 +546,7 @@ void ui_StandbyScreen_init(void) {
     lv_obj_t * wake_text = lv_label_create(standby_wake_btn);
     lv_label_set_text(wake_text, "哥哥");
     lv_obj_set_style_text_color(wake_text, lv_color_white(), 0);
-    lv_obj_set_style_text_opa(wake_text, (lv_opa_t)(LV_OPA_COVER * 4 / 5), 0);
+    lv_obj_set_style_text_opa(wake_text, LV_OPA_COVER, 0);
     lv_obj_set_style_text_font(wake_text, ui_builtin_text_font(), 0);
     ui_make_decor_hit_passthrough(wake_text);
 
@@ -420,6 +554,7 @@ void ui_StandbyScreen_init(void) {
     lv_obj_add_event_cb(ui_StandbyScreen, standby_root_event_cb, LV_EVENT_PRESSING, NULL);
     lv_obj_add_event_cb(ui_StandbyScreen, standby_root_event_cb, LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(ui_StandbyScreen, standby_root_event_cb, LV_EVENT_PRESS_LOST, NULL);
+    lv_obj_add_event_cb(ui_StandbyScreen, standby_root_event_cb, LV_EVENT_CANCEL, NULL);
     lv_obj_add_event_cb(ui_StandbyScreen, standby_screen_event_cb, LV_EVENT_SCREEN_LOADED, NULL);
     lv_obj_add_event_cb(ui_StandbyScreen, standby_screen_event_cb, LV_EVENT_SCREEN_UNLOADED, NULL);
 
@@ -427,6 +562,7 @@ void ui_StandbyScreen_init(void) {
 }
 
 void ui_StandbyScreen_deinit(void) {
+    standby_reset_interaction_state();
     smartwatch_ui_runtime_wallpaper_set_visible(false);
     if(standby_carousel_timer) {
         lv_timer_delete(standby_carousel_timer);

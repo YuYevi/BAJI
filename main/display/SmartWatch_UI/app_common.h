@@ -25,6 +25,7 @@ void app_status_set_battery(uint8_t percent, bool charging);
 
 void app_status_overlay_init(void);
 void app_status_overlay_deinit(void);
+void app_status_overlay_set_visible(bool visible);
 
 bool app_touch_event_is_drag_release(lv_event_t * e);
 
@@ -67,6 +68,7 @@ bool app_device_get_auto_power_save_enabled(void);
 bool app_device_set_auto_power_save_enabled(bool enabled);
 int32_t app_device_get_alarm_count(void);
 bool app_device_get_alarm_item(uint8_t idx, uint8_t * hour, uint8_t * minute, bool * enabled);
+uint32_t app_device_get_alarm_generation(void);
 void app_device_set_alarm_item(uint8_t idx, uint8_t hour, uint8_t minute, bool enabled);
 void app_device_set_alarm_count(uint8_t count);
 void app_device_reboot(void);

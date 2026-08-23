@@ -168,8 +168,10 @@ void LcdDisplay::InitializeTouch() {
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(i2c_bus, &tp_io_config, &touch_io_));
 
     const esp_lcd_touch_config_t tp_cfg = {
-        .x_max = static_cast<uint16_t>(width_),
-        .y_max = static_cast<uint16_t>(height_),
+        // x_max/y_max are inclusive coordinates used by esp_lcd_touch for
+        // mirroring, so they must refer to the last pixel, not the size.
+        .x_max = static_cast<uint16_t>(width_ > 0 ? width_ - 1 : 0),
+        .y_max = static_cast<uint16_t>(height_ > 0 ? height_ - 1 : 0),
         .rst_gpio_num =
 #if defined(QSPI_PIN_NUM_LCD_RST_VIRTUAL)
             (CST816S_TOUCH_RST_PIN == QSPI_PIN_NUM_LCD_RST_VIRTUAL ? GPIO_NUM_NC : CST816S_TOUCH_RST_PIN),
@@ -342,6 +344,9 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
         .io_handle = panel_io_,
         .panel_handle = panel_,
         .control_handle = nullptr,
+        // Keep the draw buffers small enough to leave internal DMA heap for
+        // BluFi/Bluetooth work queues.  The wallpaper preview is already
+        // cached in PSRAM, so enlarging this buffer is not worth the RAM cost.
         .buffer_size = static_cast<uint32_t>(width_ * 20),
         .double_buffer = true,
         .trans_size = 0,
