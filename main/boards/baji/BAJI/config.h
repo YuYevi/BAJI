@@ -132,7 +132,7 @@
  * role: MJQ / DCX / SYX / LYW / ZZY / YHX / HJL
  * network_version: WIFI / 4G
  */
-#define BAJI_OTA_ROLE                   ""
+#define BAJI_OTA_ROLE                   "SXH"
 #ifdef CONFIG_BAJI_WIFI_ONLY
 #define BAJI_OTA_NETWORK_VERSION        "WIFI"
 #else

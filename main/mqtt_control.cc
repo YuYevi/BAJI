@@ -78,7 +78,7 @@ std::string GetAuthUrl() {
     if (origin.empty()) {
         origin = "https://www.xinyhx.com";
     }
-    return origin + "/auth/device";
+    return origin + "/authcyhx/device";
 }
 
 // 刷新 JWT Token

@@ -774,6 +774,8 @@ private:
     bool auto_power_restore_pending_ = false;    ///< 是否记录了开启前的亮度/音量
     uint8_t auto_power_saved_brightness_ = 100;  ///< 开启前亮度
     uint8_t auto_power_saved_volume_ = 100;      ///< 开启前音量
+    bool power_key_screen_off_ = false;          ///< 是否由电源键手动息屏
+    uint8_t power_key_screen_brightness_ = 100;  ///< 手动息屏前的亮度
     std::string factory_ota_role_;
     std::string factory_ota_network_version_;
 
@@ -1963,6 +1965,35 @@ private:
         GetDisplay()->ShowNotification(msg);
     }
 
+    bool WakePowerKeyScreenIfOff() {
+        if (!power_key_screen_off_) {
+            return false;
+        }
+
+        power_key_screen_off_ = false;
+        if (power_save_timer_) {
+            power_save_timer_->WakeUp();
+        }
+        if (display_ != nullptr) {
+            display_->SetTouchEnabled(true);
+        }
+        if (auto* backlight = GetBacklight(); backlight != nullptr) {
+            backlight->SetBrightness(power_key_screen_brightness_, false);
+        }
+        return true;
+    }
+
+    void TurnOffScreenFromPowerKey() {
+        if (auto* backlight = GetBacklight(); backlight != nullptr) {
+            power_key_screen_brightness_ = GetCurrentBrightnessLevel();
+            power_key_screen_off_ = true;
+            if (display_ != nullptr) {
+                display_->SetTouchEnabled(false);
+            }
+            backlight->SetBrightness(0, false);
+        }
+    }
+
     void TriggerWifiReprovision() {
 #ifdef CONFIG_BAJI_WIFI_ONLY
         if (IsManualWifiConfigMode() && ExitManualWifiConfigMode()) {
@@ -2153,16 +2184,28 @@ private:
         });
         power_manager_->OnPowerSingleClick([this]() {
             Application::GetInstance().Schedule([this]() {
+                if (WakePowerKeyScreenIfOff()) {
+                    return;
+                }
+
                 if (power_save_timer_) {
                     power_save_timer_->WakeUp();
                 }
                 if (display_ != nullptr && display_->IsSmartWatchUiActive()) {
-                    display_->SmartWatchUiBack();
+                    if (!display_->SmartWatchUiBack()) {
+                        // No navigation target remains: the next power-key
+                        // click should wake the display instead of navigating.
+                        TurnOffScreenFromPowerKey();
+                    }
                 }
             });
         });
         power_manager_->OnPowerDoubleClick([this]() {
             Application::GetInstance().Schedule([this]() {
+                if (WakePowerKeyScreenIfOff()) {
+                    return;
+                }
+
                 if (power_save_timer_) {
                     power_save_timer_->WakeUp();
                 }
@@ -2173,6 +2216,10 @@ private:
         });
         power_manager_->OnPowerTripleClick([this]() {
             Application::GetInstance().Schedule([this]() {
+                if (WakePowerKeyScreenIfOff()) {
+                    return;
+                }
+
                 if (power_save_timer_) {
                     power_save_timer_->WakeUp();
                 }
@@ -2187,10 +2234,16 @@ private:
     void InitializePowerSaveTimer() {
         power_save_timer_ = new PowerSaveTimer(-1, 60, -1);
         power_save_timer_->OnEnterSleepMode([this]() {
+            if (power_key_screen_off_) {
+                return;
+            }
             display_->SetChatMessage("system", "");
             GetBacklight()->SetBrightness(10);
         });
         power_save_timer_->OnExitSleepMode([this]() {
+            if (power_key_screen_off_) {
+                return;
+            }
             display_->SetChatMessage("system", "");
             if (GetAutoPowerSaveEnabled()) {
                 GetBacklight()->SetBrightness(kAutoPowerTargetBrightness, false);

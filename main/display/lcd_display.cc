@@ -978,6 +978,20 @@ void LcdDisplay::SetPowerSaveMode(bool on) {
     smartwatch_ui_runtime_set_emotion("neutral");
 }
 
+void LcdDisplay::SetTouchEnabled(bool enabled) {
+    DisplayLockGuard lock(this);
+    if (touch_indev_ == nullptr) {
+        return;
+    }
+
+    if (!enabled) {
+        // Drop any in-flight press before disabling the input device so it
+        // cannot be delivered after the screen is woken again.
+        lv_indev_reset(touch_indev_, nullptr);
+    }
+    lv_indev_enable(touch_indev_, enabled);
+}
+
 bool LcdDisplay::SmartWatchUiBack() {
     if (!smart_watch_ui_active_) {
         return false;

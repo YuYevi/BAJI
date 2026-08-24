@@ -99,6 +99,7 @@ public:
     void SetHideSubtitle(bool hide);
 
     void SetEmojiVisible(bool visible);
+    void SetTouchEnabled(bool enabled);
     bool IsSmartWatchUiActive() const { return smart_watch_ui_active_; }
     bool SmartWatchUiBack();
     void SmartWatchUiShowStandby();
