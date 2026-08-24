@@ -56,6 +56,11 @@ void ui_nav_reset(void);
 void ui_nav_register(lv_obj_t ** screen, void (*init)(void), void (*deinit)(void));
 void ui_nav_push(lv_obj_t ** target, lv_screen_load_anim_t fademode, int spd, int delay);
 bool ui_nav_back(lv_screen_load_anim_t fademode, int spd, int delay);
+/* 添加时间: 2026-08-19
+ * 原因: 松手/右滑回调里同步切页会打乱 LVGL 触摸态，快速进出栏目会假死。
+ * 逻辑: 只排队，等本轮输入事件结束后再调用原来的 ui_nav_push/ui_nav_back，目标页不变。 */
+void ui_nav_push_async(lv_obj_t ** target);
+void ui_nav_back_async(void);
 void ui_nav_invalidate(lv_obj_t ** target);
 void ui_make_decor_hit_passthrough(lv_obj_t * obj);
 

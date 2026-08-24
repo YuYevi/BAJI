@@ -365,8 +365,11 @@ static bool home_is_valid_release(lv_event_t * e)
 /* 跳转到指定目标页面。 */
 static void home_open_screen(lv_obj_t ** target_screen)
 {
+    /* 添加时间: 2026-08-19
+     * 原因: 主界面松手回调里同步切页会假死。
+     * 逻辑: 仍打开原来的 target_screen，只把 ui_nav_push 延后到触摸事件结束。 */
     if(!target_screen) return;
-    ui_nav_push(target_screen, LV_SCR_LOAD_ANIM_NONE, 0, 0);
+    ui_nav_push_async(target_screen);
 }
 
 /* AI 入口点击事件，负责按压反馈和页面跳转。 */

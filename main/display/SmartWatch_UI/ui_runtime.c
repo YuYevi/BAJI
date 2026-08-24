@@ -14,6 +14,12 @@ static lv_obj_t * g_bottom_toast_root;
 static lv_obj_t * g_bottom_toast_label;
 static lv_timer_t * g_bottom_toast_timer;
 static const uint32_t kToastDefaultDurationMs = 2000;
+/* 添加时间: 2026-08-19
+ * 原因: 右滑返回要延后执行。
+ * 逻辑: 同一时刻只排队一次原来的 smartwatch_ui_runtime_back，避免连滑重复退栈。 */
+static bool s_pending_runtime_back;
+
+static void smartwatch_ui_runtime_back_async_cb(void * user_data);
 
 static void update_toast_size(lv_obj_t * root, lv_obj_t * label)
 {
@@ -114,6 +120,13 @@ void smartwatch_ui_runtime_deinit(void)
 {
     if(!g_runtime_inited) return;
 
+    /* 添加时间: 2026-08-19
+     * 原因: 界面销毁后若异步返回还在队列里，会切到已释放对象。
+     * 逻辑: 先取消未执行的异步返回和导航，再走原来的销毁流程。 */
+    lv_async_call_cancel(smartwatch_ui_runtime_back_async_cb, NULL);
+    s_pending_runtime_back = false;
+    ui_nav_reset();
+
     if(g_top_toast_timer) {
         lv_timer_delete(g_top_toast_timer);
         g_top_toast_timer = NULL;
@@ -152,6 +165,12 @@ bool smartwatch_ui_runtime_is_ai_chat_active(void)
 
 static void smartwatch_ui_runtime_show_standby_internal(bool exiting_ai_chat)
 {
+    /* 添加时间: 2026-08-19
+     * 原因: 进待机时若还排队着右滑返回，会在待机页再退一次栈。
+     * 逻辑: 先取消异步返回，再执行原来的清栈和切待机。 */
+    lv_async_call_cancel(smartwatch_ui_runtime_back_async_cb, NULL);
+    s_pending_runtime_back = false;
+
     if(lv_screen_active() == ui_StandbyScreen) return;
     if(exiting_ai_chat) {
         smartwatch_ui_runtime_exit_ai_chat_to_standby();
@@ -191,6 +210,24 @@ bool smartwatch_ui_runtime_back(void)
         return true;
     }
     return false;
+}
+
+static void smartwatch_ui_runtime_back_async_cb(void * user_data)
+{
+    (void)user_data;
+    s_pending_runtime_back = false;
+    (void)smartwatch_ui_runtime_back();
+}
+
+void smartwatch_ui_runtime_back_async(void)
+{
+    /* 添加时间: 2026-08-19
+     * 原因: 右滑发生在触摸事件中。
+     * 逻辑: 排队调用原来的 smartwatch_ui_runtime_back（关浮层、退栈、陪伴回待机），连滑只执行一次。 */
+    if(!g_runtime_inited) return;
+    if(s_pending_runtime_back) return;
+    s_pending_runtime_back = true;
+    lv_async_call(smartwatch_ui_runtime_back_async_cb, NULL);
 }
 
 void smartwatch_ui_runtime_show_standby(void)

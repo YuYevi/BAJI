@@ -243,17 +243,20 @@ static void standby_carousel_timer_cb(lv_timer_t * timer)
 
 static void standby_go_home(void)
 {
+    /* 添加时间: 2026-08-19
+     * 原因: 上滑进主界面发生在松手事件里，同步切页会打乱触摸状态。
+     * 逻辑: 仍隐藏待机壁纸并进入主界面；init/切页由原来的 ui_nav_push 在事件结束后完成。 */
     smartwatch_ui_runtime_wallpaper_set_visible(false);
-    if(ui_HomeScreen == NULL) {
-        ui_HomeScreen_init();
-    }
-    ui_nav_push(&ui_HomeScreen, LV_SCR_LOAD_ANIM_NONE, 0, 0);
+    ui_nav_push_async(&ui_HomeScreen);
 }
 
 static void standby_go_chat(void)
 {
+    /* 添加时间: 2026-08-19
+     * 原因: 点击唤醒进陪伴页同样不能在触摸事件里同步切页。
+     * 逻辑: 目标仍是陪伴页，只延后执行原 ui_nav_push。 */
     smartwatch_ui_runtime_wallpaper_set_visible(false);
-    ui_nav_push(&ui_AIChatScreen, LV_SCR_LOAD_ANIM_NONE, 0, 0);
+    ui_nav_push_async(&ui_AIChatScreen);
 }
 
 static void standby_swipe_overlay_set_progress(int32_t dy)

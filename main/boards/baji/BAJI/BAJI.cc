@@ -800,6 +800,10 @@ private:
     std::atomic<bool> network_link_up_{false};
     std::atomic<uint32_t> network_generation_{0};
     std::atomic<bool> save_preferred_on_connect_{false};
+    /* 添加时间: 2026-08-19
+     * 原因: 三击取消配网必须回到进入前的 4G/WiFi，不能把这次临时切 WiFi 当成新的首选网络。
+     * 逻辑: 进入配网前记下原后端；取消时按该值恢复，配网成功连上后再由 save_preferred_on_connect_ 写入 WiFi。 */
+    std::atomic<NetMode> network_mode_before_provision_{NetMode::WIFI};
     std::unique_ptr<Ml307Board> ml307_board_;    ///< ML307模块管理对象
     NetworkEventCallback net_cb_;                ///< 网络事件回调
     mutable std::mutex net_cb_mutex_;
@@ -1911,6 +1915,23 @@ private:
         }
         return true;
     }
+
+    /* 添加时间: 2026-08-19
+     * 原因: 三击取消配网后原先只关 BLUFI 并按“有无已存热点”决定是否重连 WiFi，
+     *      从 4G 进来会被卡在无网；进配网时还把首选网络写成了 WiFi。
+     * 逻辑: 进入前记下原后端。取消时若原是 4G，走 RequestNetworkSwitch(ML307)
+     *      （内部 StopWifiNow 关配网再拉 4G，且 WifiProvisioning→4G 已放行）；
+     *      原是 WiFi 则仍走 ExitManualWifiConfigMode，有已存热点则重连。 */
+    bool RestoreNetworkAfterCancelledProvision() {
+        const NetMode restore = network_mode_before_provision_.load();
+        if (restore == NetMode::ML307) {
+            if (RequestNetworkSwitch(NetMode::ML307, false, false)) {
+                return true;
+            }
+            ESP_LOGW(TAG, "Cancel provision: restore 4G failed, stop config mode only");
+        }
+        return ExitManualWifiConfigMode();
+    }
 #endif
 
     /**
@@ -1967,8 +1988,10 @@ private:
         if (IsInWifiConfigMode() && !IsManualWifiConfigMode()) {
             EnterWifiConfigMode();
         }
-        if (IsManualWifiConfigMode() && ExitManualWifiConfigMode()) {
-            GetDisplay()->ShowNotification("退出配网模式", 2000);
+        if (IsManualWifiConfigMode()) {
+            if (RestoreNetworkAfterCancelledProvision()) {
+                GetDisplay()->ShowNotification("退出配网模式", 2000);
+            }
             return;
         }
 
@@ -1985,6 +2008,10 @@ private:
         BeginNetworkGeneration();
         target_network_mode_.store(BoardNetworkMode::WIFI);
         network_link_up_.store(false);
+        /* 添加时间: 2026-08-19
+         * 原因: 进配网只是临时切 WiFi 后端，不能立刻把开机首选改成 WiFi。
+         * 逻辑: 先记下当前 4G/WiFi；配网成功连上后再由 save_preferred_on_connect_ 写入。 */
+        network_mode_before_provision_.store(net_mode_.load());
         save_preferred_on_connect_.store(false);
         SetNetFlowState(NetFlowState::WifiProvisioning);
 
@@ -2063,7 +2090,10 @@ private:
             self->MarkNetworkOffline();
             self->SetBackendMode(NetMode::WIFI);
             self->BindWifiNetworkCallback();
-            self->SavePreferredNetwork(NetMode::WIFI);
+            /* 添加时间: 2026-08-19
+             * 原因: 原先这里立刻 SavePreferredNetwork(WIFI)，取消配网后开机偏好已变成 WiFi，4G 回不去。
+             * 逻辑: 不改 NVS 首选；配网成功连上 WiFi 时再写入。 */
+            self->save_preferred_on_connect_.store(true);
             self->SetWifiAutoReconnectEnabled(true);
             self->EnterWifiConfigMode();
             self->wifi_reprovision_task_ = nullptr;

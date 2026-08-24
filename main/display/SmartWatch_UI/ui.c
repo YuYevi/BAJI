@@ -52,6 +52,11 @@ void ui_init(void)
 
 void ui_destroy(void)
 {
+    /* 添加时间: 2026-08-19
+     * 原因: 销毁界面前若异步切页还在队列，会访问已释放对象。
+     * 逻辑: 先取消导航排队，再按原来的顺序 deinit 各页。 */
+    ui_nav_reset();
+
     /* 释放各界面资源 */
     ui_HomeScreen_deinit();
     ui_StandbyScreen_deinit();

@@ -16,6 +16,27 @@ static uint8_t ui_nav_stack_len;
 static lv_obj_t ** ui_nav_cache[UI_NAV_CACHE_MAX];
 static uint8_t ui_nav_cache_len;
 
+/* 添加时间: 2026-08-19
+ * 原因: 点击回调里不能直接切页。
+ * 逻辑: 用 lv_async_call 把 push/back 排到 LVGL 事件处理完之后；连点同一目标只跳一次。 */
+typedef enum {
+    UI_NAV_ASYNC_NONE = 0,
+    UI_NAV_ASYNC_PUSH,
+    UI_NAV_ASYNC_BACK,
+} ui_nav_async_kind_t;
+
+static ui_nav_async_kind_t s_nav_async_kind;
+static lv_obj_t ** s_nav_async_target;
+
+static void ui_nav_async_cb(void * user_data);
+
+static void ui_nav_async_cancel_pending(void)
+{
+    lv_async_call_cancel(ui_nav_async_cb, NULL);
+    s_nav_async_kind = UI_NAV_ASYNC_NONE;
+    s_nav_async_target = NULL;
+}
+
 static bool ui_nav_keep_requested_anim(lv_obj_t ** current, lv_obj_t ** target, lv_screen_load_anim_t requested)
 {
     if(current != &ui_StandbyScreen) return false;
@@ -69,17 +90,34 @@ static bool ui_nav_cache_contains(lv_obj_t ** pp)
     return false;
 }
 
+static bool ui_nav_cache_is_pinned(lv_obj_t ** pp)
+{
+    /* 添加时间: 2026-08-19
+     * 原因: 栏目轮流进出时 FIFO 会把主界面踢出缓存并 deinit，返回时整页重建容易卡死。
+     * 逻辑: 只钉住主界面指针，其它页仍按原 FIFO 淘汰，进出栏目的目标页不变。 */
+    return pp == &ui_HomeScreen;
+}
+
 static void ui_nav_cache_add(lv_obj_t ** pp)
 {
+    if(!pp) return;
     if(ui_nav_cache_contains(pp)) return;
     if(ui_nav_cache_len >= UI_NAV_CACHE_MAX) {
-        lv_obj_t ** evict = ui_nav_cache[0];
+        uint8_t evict_i = 0;
+        while(evict_i < ui_nav_cache_len && ui_nav_cache_is_pinned(ui_nav_cache[evict_i])) {
+            evict_i++;
+        }
+        if(evict_i >= ui_nav_cache_len) {
+            return;
+        }
+        lv_obj_t ** evict = ui_nav_cache[evict_i];
         if(evict && *evict) {
             const ui_nav_entry_t * ent = ui_nav_find_by_pp(evict);
             if(ent && ent->deinit) ent->deinit();
         }
-        for(uint8_t i = 1; i < ui_nav_cache_len; i++)
+        for(uint8_t i = evict_i + 1; i < ui_nav_cache_len; i++) {
             ui_nav_cache[i - 1] = ui_nav_cache[i];
+        }
         ui_nav_cache_len--;
     }
     ui_nav_cache[ui_nav_cache_len++] = pp;
@@ -106,6 +144,7 @@ void ui_make_decor_hit_passthrough(lv_obj_t * obj)
 
 void ui_nav_reset(void)
 {
+    ui_nav_async_cancel_pending();
     ui_nav_stack_len = 0;
     ui_nav_cache_len = 0;
 }
@@ -129,6 +168,11 @@ void ui_nav_register(lv_obj_t ** screen, void (*init)(void), void (*deinit)(void
 
 void ui_nav_push(lv_obj_t ** target, lv_screen_load_anim_t fademode, int spd, int delay)
 {
+    /* 添加时间: 2026-08-19
+     * 原因: 电源键/闹钟等同步切页若晚于点击排队，会把用户刚点的页再切走。
+     * 逻辑: 真正执行 push 前取消未执行的异步导航，业务仍走下面原有入栈+切页。 */
+    ui_nav_async_cancel_pending();
+
     const ui_nav_entry_t * target_ent = ui_nav_find_by_pp(target);
     if(!target_ent || !target_ent->init) return;
 
@@ -150,6 +194,8 @@ void ui_nav_push(lv_obj_t ** target, lv_screen_load_anim_t fademode, int spd, in
 
 bool ui_nav_back(lv_screen_load_anim_t fademode, int spd, int delay)
 {
+    ui_nav_async_cancel_pending();
+
     if(ui_nav_stack_len == 0) return false;
 
     lv_obj_t * cur_scr = lv_screen_active();
@@ -168,6 +214,50 @@ bool ui_nav_back(lv_screen_load_anim_t fademode, int spd, int delay)
                       ui_nav_resolve_delay(cur_screen_pp, prev.screen, fademode, delay), prev.init);
 
     return true;
+}
+
+static void ui_nav_async_cb(void * user_data)
+{
+    (void)user_data;
+    ui_nav_async_kind_t kind = s_nav_async_kind;
+    lv_obj_t ** target = s_nav_async_target;
+    s_nav_async_kind = UI_NAV_ASYNC_NONE;
+    s_nav_async_target = NULL;
+
+    if(kind == UI_NAV_ASYNC_PUSH) {
+        ui_nav_push(target, LV_SCR_LOAD_ANIM_NONE, 0, 0);
+    } else if(kind == UI_NAV_ASYNC_BACK) {
+        (void)ui_nav_back(LV_SCR_LOAD_ANIM_NONE, 0, 0);
+    }
+}
+
+void ui_nav_push_async(lv_obj_t ** target)
+{
+    /* 添加时间: 2026-08-19
+     * 原因: 松手回调不能同步切页。
+     * 逻辑: 把原来的 ui_nav_push(target, NONE, 0, 0) 排到事件后；同一目标连点合并为一次。 */
+    if(!target) return;
+    if(s_nav_async_kind == UI_NAV_ASYNC_PUSH && s_nav_async_target == target) {
+        return;
+    }
+    lv_async_call_cancel(ui_nav_async_cb, NULL);
+    s_nav_async_kind = UI_NAV_ASYNC_PUSH;
+    s_nav_async_target = target;
+    lv_async_call(ui_nav_async_cb, NULL);
+}
+
+void ui_nav_back_async(void)
+{
+    /* 添加时间: 2026-08-19
+     * 原因: 返回同样不能在触摸事件里同步切页。
+     * 逻辑: 排队调用原来的 ui_nav_back(NONE, 0, 0)，重复返回合并为一次。 */
+    if(s_nav_async_kind == UI_NAV_ASYNC_BACK) {
+        return;
+    }
+    lv_async_call_cancel(ui_nav_async_cb, NULL);
+    s_nav_async_kind = UI_NAV_ASYNC_BACK;
+    s_nav_async_target = NULL;
+    lv_async_call(ui_nav_async_cb, NULL);
 }
 
 void ui_nav_invalidate(lv_obj_t ** target)
@@ -224,7 +314,12 @@ void _ui_slider_set_property(lv_obj_t * target, int id, int val)
 void _ui_screen_change(lv_obj_t ** target, lv_screen_load_anim_t fademode, int spd, int delay,
                        void (*target_init)(void))
 {
-    lv_indev_reset(NULL, NULL);
+    /* 添加时间: 2026-08-19
+     * 原因: 触摸事件未结束时 lv_indev_reset(NULL,NULL) 再切页，会把 LVGL 输入状态打乱导致假死。
+     * 逻辑: 仍在输入事件中则跳过复位；事件已结束（电源键/异步回调/定时器）则保持原来的全设备复位。切页目标与动画参数不变。 */
+    if(lv_indev_get_act() == NULL) {
+        lv_indev_reset(NULL, NULL);
+    }
 
     if(*target == NULL)
         target_init();

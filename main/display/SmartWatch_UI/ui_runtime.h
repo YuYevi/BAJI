@@ -25,6 +25,10 @@ void smartwatch_ui_runtime_exit_ai_chat_to_standby(void);
 const lv_font_t * smartwatch_ui_runtime_get_text_font(void);
 
 bool smartwatch_ui_runtime_back(void);
+/* 添加时间: 2026-08-19
+ * 原因: 右滑返回发生在触摸事件中，同步切页会假死。
+ * 逻辑: 仍走原来的 smartwatch_ui_runtime_back（关浮层/退栈/回待机），只是延后到事件结束后执行。 */
+void smartwatch_ui_runtime_back_async(void);
 void smartwatch_ui_runtime_show_standby(void);
 void smartwatch_ui_runtime_show_home(void);
 void smartwatch_ui_runtime_show_ai_chat(void);

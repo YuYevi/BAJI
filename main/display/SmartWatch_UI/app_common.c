@@ -84,18 +84,18 @@ static void swipe_back_reset_state(void)
 
 static bool swipe_back_try_trigger(lv_indev_t * indev)
 {
+    /* 添加时间: 2026-08-19
+     * 原因: 右滑在手势/松手回调里同步切页并复位触摸，快速进出会假死。
+     * 逻辑: 冷却时间仍是 180ms；不再当场切页/复位触摸，改为事件结束后走原来的 runtime_back。 */
+    (void)indev;
     uint32_t now = lv_tick_get();
     if(now - g_swipe_back_last_trigger_tick < APP_SWIPE_BACK_COOLDOWN_MS) {
         return false;
     }
 
-    if(!smartwatch_ui_runtime_back()) {
-        return false;
-    }
-
     swipe_back_reset_state();
     g_swipe_back_last_trigger_tick = now;
-    lv_indev_reset(indev, NULL);
+    smartwatch_ui_runtime_back_async();
     return true;
 }
 
