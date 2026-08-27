@@ -1,6 +1,7 @@
 #include "backlight.h"
 #include "settings.h"
 
+#include <algorithm>
 #include <esp_log.h>
 #include <driver/ledc.h>
 
@@ -37,7 +38,7 @@ Backlight::Backlight() {
 
 Backlight::~Backlight() {
     if (transition_timer_ != nullptr) {
-        esp_timer_stop(transition_timer_);
+        StopTransitionTimer(transition_timer_);
         esp_timer_delete(transition_timer_);
     }
 }
@@ -55,21 +56,24 @@ void Backlight::RestoreBrightness() {
     SetBrightness(saved_brightness);
 }
 
-void Backlight::SetBrightness(uint8_t brightness, bool permanent) {
-    if (brightness > 100) {
-        brightness = 100;
+void Backlight::ApplyTargetBrightnessLocked(uint8_t target_brightness, bool immediate) {
+    if (target_brightness > 100) {
+        target_brightness = 100;
     }
 
-    if (permanent) {
-        Settings settings("display", true);
-        settings.SetInt("brightness", brightness);
-    }
-
-    if (brightness_ == brightness && target_brightness_ == brightness) {
+    if (immediate) {
+        StopTransitionTimer(transition_timer_);
+        target_brightness_ = target_brightness;
+        brightness_ = target_brightness;
+        SetBrightnessImpl(brightness_);
         return;
     }
 
-    target_brightness_ = brightness;
+    if (brightness_ == target_brightness_ && target_brightness_ == target_brightness) {
+        return;
+    }
+
+    target_brightness_ = target_brightness;
     if (brightness_ == target_brightness_) {
         StopTransitionTimer(transition_timer_);
         return;
@@ -83,7 +87,58 @@ void Backlight::SetBrightness(uint8_t brightness, bool permanent) {
     }
 }
 
+void Backlight::SetBrightness(uint8_t brightness, bool permanent) {
+    if (brightness > 100) {
+        brightness = 100;
+    }
+
+    if (permanent) {
+        Settings settings("display", true);
+        settings.SetInt("brightness", brightness);
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    requested_brightness_ = brightness;
+    ApplyTargetBrightnessLocked(std::min(brightness, brightness_limit_), false);
+}
+
+void Backlight::SetBrightnessImmediate(uint8_t brightness, bool permanent) {
+    if (brightness > 100) {
+        brightness = 100;
+    }
+
+    if (permanent) {
+        Settings settings("display", true);
+        settings.SetInt("brightness", brightness);
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    requested_brightness_ = brightness;
+    ApplyTargetBrightnessLocked(std::min(brightness, brightness_limit_), true);
+}
+
+void Backlight::SetBrightnessLimit(uint8_t max_brightness, bool immediate) {
+    if (max_brightness > 100) {
+        max_brightness = 100;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    brightness_limit_ = max_brightness;
+    ApplyTargetBrightnessLocked(std::min(requested_brightness_, brightness_limit_), immediate);
+}
+
+uint8_t Backlight::brightness() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return target_brightness_;
+}
+
+uint8_t Backlight::requested_brightness() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return requested_brightness_;
+}
+
 void Backlight::OnTransitionTimer() {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (brightness_ == target_brightness_) {
         StopTransitionTimer(transition_timer_);
         return;

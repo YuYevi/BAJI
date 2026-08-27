@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <atomic>
+#include <mutex>
 
 #include <esp_timer.h>
 #include <esp_pm.h>
@@ -21,6 +22,7 @@ private:
     void PowerSaveCheck();
 
     esp_timer_handle_t power_save_timer_ = nullptr;
+    std::mutex timer_mutex_;
     std::atomic<bool> enabled_{false};
     std::atomic<bool> in_sleep_mode_{false};
     std::atomic<bool> is_wake_word_running_{false};

@@ -55,6 +55,15 @@
 #define POWER_BATTERY_ADC_CHANNEL       ADC_CHANNEL_3  // 电池ADC通道
 #define POWER_USBIN_ADC_CHANNEL         ADC_CHANNEL_1  // USB输入ADC通道
 
+// Fast battery protection is intentionally separate from the smoothed UI
+// percentage.  Tune these values against the assembled battery/PMIC.
+#define POWER_BATTERY_LOW_VOLTAGE_MV             3500
+#define POWER_BATTERY_LOW_RECOVER_VOLTAGE_MV     3600
+#define POWER_BATTERY_CRITICAL_VOLTAGE_MV        3250
+#define POWER_BATTERY_PROTECTION_SAMPLE_MS       250
+#define POWER_BATTERY_CRITICAL_CONFIRM_MS        2000
+#define POWER_BATTERY_LOW_BACKLIGHT_LIMIT        20
+
 #define POWER_CHARGE_DETECT_USE_GPIO    1              // 是否使用GPIO检测充电
 #define POWER_USB_VBUS_ACTIVE_LEVEL     1              // USB VBUS有效电平
 #define POWER_KEY_LEVEL_WHEN_PRESSED    0              // 电源键按下时的电平

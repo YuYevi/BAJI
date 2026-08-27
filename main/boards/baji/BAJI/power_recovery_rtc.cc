@@ -19,6 +19,8 @@ bool IsFaultReset(esp_reset_reason_t reason) {
         case ESP_RST_INT_WDT:
         case ESP_RST_TASK_WDT:
         case ESP_RST_WDT:
+        case ESP_RST_BROWNOUT:
+        case ESP_RST_PWR_GLITCH:
         case ESP_RST_CPU_LOCKUP:
             return true;
         default:

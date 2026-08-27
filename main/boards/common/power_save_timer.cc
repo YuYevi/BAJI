@@ -24,28 +24,54 @@ PowerSaveTimer::PowerSaveTimer(int cpu_max_freq, int seconds_to_sleep, int secon
 }
 
 PowerSaveTimer::~PowerSaveTimer() {
-    esp_timer_stop(power_save_timer_);
-    esp_timer_delete(power_save_timer_);
+    std::lock_guard<std::mutex> lock(timer_mutex_);
+    if (power_save_timer_ != nullptr) {
+        (void)esp_timer_stop(power_save_timer_);
+        (void)esp_timer_delete(power_save_timer_);
+        power_save_timer_ = nullptr;
+    }
+    enabled_.store(false);
 }
 
 void PowerSaveTimer::SetEnabled(bool enabled) {
-    if (enabled && !enabled_) {
+    if (enabled) {
         Settings settings("wifi", false);
         if (!settings.GetBool("sleep_mode", false)) {
-            
             return;
         }
 
-        ticks_ = 0;
-        enabled_ = enabled;
-        ESP_ERROR_CHECK(esp_timer_start_periodic(power_save_timer_, 1000000));
-        
-    } else if (!enabled && enabled_) {
-        ESP_ERROR_CHECK(esp_timer_stop(power_save_timer_));
-        enabled_ = enabled;
-        WakeUp();
-        
+        std::lock_guard<std::mutex> lock(timer_mutex_);
+        if (enabled_.load() || power_save_timer_ == nullptr) {
+            return;
+        }
+
+        ticks_.store(0);
+        const esp_err_t ret = esp_timer_start_periodic(power_save_timer_, 1000000);
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG, "Failed to start power-save timer: %s", esp_err_to_name(ret));
+            return;
+        }
+        enabled_.store(true);
+        return;
     }
+
+    {
+        std::lock_guard<std::mutex> lock(timer_mutex_);
+        if (power_save_timer_ == nullptr) {
+            return;
+        }
+
+        if (enabled_.load()) {
+            const esp_err_t ret = esp_timer_stop(power_save_timer_);
+            if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+                ESP_LOGE(TAG, "Failed to stop power-save timer: %s", esp_err_to_name(ret));
+            }
+            enabled_.store(false);
+        }
+    }
+    // WakeUp must run even when the timer was already disabled: a callback may
+    // have entered sleep just before SetEnabled(false) acquired the mutex.
+    WakeUp();
 }
 
 void PowerSaveTimer::OnEnterSleepMode(std::function<void()> callback) {
@@ -61,6 +87,10 @@ void PowerSaveTimer::OnShutdownRequest(std::function<void()> callback) {
 }
 
 void PowerSaveTimer::PowerSaveCheck() {
+    if (!enabled_.load()) {
+        return;
+    }
+
     auto& app = Application::GetInstance();
     if (!in_sleep_mode_ && !app.CanEnterSleepMode()) {
         ticks_ = 0;
@@ -69,9 +99,18 @@ void PowerSaveTimer::PowerSaveCheck() {
 
     ticks_++;
     if (seconds_to_sleep_ != -1 && ticks_ >= seconds_to_sleep_) {
-        if (!in_sleep_mode_) {
-            
-            in_sleep_mode_ = true;
+        bool entered_sleep = false;
+        {
+            // SetEnabled(false) can stop the timer while this callback is
+            // already out of the timer queue. Re-check under the same lock
+            // used by WakeUp so a stale callback cannot re-enter sleep.
+            std::lock_guard<std::mutex> lock(timer_mutex_);
+            if (enabled_.load() && !in_sleep_mode_.load()) {
+                in_sleep_mode_.store(true);
+                entered_sleep = true;
+            }
+        }
+        if (entered_sleep) {
             if (on_enter_sleep_mode_) {
                 app.Schedule([this]() {
                     if (in_sleep_mode_ && on_enter_sleep_mode_) {
@@ -103,6 +142,12 @@ void PowerSaveTimer::PowerSaveCheck() {
             }
         }
     }
+    {
+        std::lock_guard<std::mutex> lock(timer_mutex_);
+        if (!enabled_.load()) {
+            return;
+        }
+    }
     if (seconds_to_shutdown_ != -1 && ticks_ >= seconds_to_shutdown_ && on_shutdown_request_) {
         on_shutdown_request_();
     }
@@ -110,10 +155,16 @@ void PowerSaveTimer::PowerSaveCheck() {
 
 void PowerSaveTimer::WakeUp() {
     ticks_ = 0;
-    if (in_sleep_mode_) {
+    bool was_sleeping = false;
+    {
+        std::lock_guard<std::mutex> lock(timer_mutex_);
+        if (in_sleep_mode_.load()) {
+            in_sleep_mode_.store(false);
+            was_sleeping = true;
+        }
+    }
+    if (was_sleeping) {
         
-        in_sleep_mode_ = false;
-
         if (cpu_max_freq_ != -1) {
             esp_pm_config_t pm_config = {
                 .max_freq_mhz = cpu_max_freq_,

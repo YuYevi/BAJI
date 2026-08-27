@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <vector>
 #include <functional>
 
@@ -30,6 +31,7 @@ class PowerManager {
 private:
     esp_timer_handle_t timer_handle_ = nullptr;
     esp_timer_handle_t power_timer_handle_ = nullptr;
+    esp_timer_handle_t protection_timer_handle_ = nullptr;
     TaskHandle_t power_key_failsafe_task_handle_ = nullptr;
     inline static constexpr uint32_t kPowerKeyFailsafeStackSize = 3072;
     inline static StaticTask_t power_key_failsafe_task_buffer_{};
@@ -40,11 +42,12 @@ private:
 
     gpio_num_t charging_pin_ = GPIO_NUM_NC;
     std::vector<uint16_t> battery_mv_samples_;
-    uint8_t battery_level_ = 30;
+    std::vector<uint16_t> fast_battery_mv_samples_;
+    std::atomic<uint8_t> battery_level_{30};
     uint8_t measured_battery_level_ = 30;
     uint8_t persisted_battery_level_ = 30;
-    bool is_charging_ = false;
-    bool is_low_battery_ = false;
+    std::atomic<bool> is_charging_{false};
+    std::atomic<bool> is_low_battery_{false};
     bool is_first_battery_read_ = true;
     bool battery_state_loaded_ = false;
     int ticks_ = 0;
@@ -54,6 +57,10 @@ private:
     uint16_t near_full_charge_seconds_ = 0;
     uint16_t charge_state_debounce_seconds_ = 0;
     uint16_t battery_persist_seconds_ = 0;
+    int latest_battery_mv_ = 0;
+    int fast_average_battery_mv_ = 0;
+    int64_t critical_battery_low_since_us_ = 0;
+    std::atomic<bool> critical_shutdown_requested_{false};
     adc_oneshot_unit_handle_t adc_handle_ = nullptr;
     adc_cali_handle_t adc_cali_handle_ = nullptr;
     enum class AdcCaliScheme {
@@ -95,8 +102,10 @@ private:
     static constexpr int kNearFullBatteryMv = 4050;
     static constexpr int kNearFullChargeTime = 180;
     static constexpr int kNearFullLevel = 95;
+    static constexpr int kFastLowBatteryDataCount = 3;
+    static constexpr int kFastBatteryDataCount = 4;
 
-    bool new_charging_status = false;
+    std::atomic<bool> new_charging_status_{false};
     bool pending_charging_status_ = false;
     std::atomic<bool> shutdown_requested_{false};
     std::atomic<bool> shutdown_task_started_{false};
@@ -149,6 +158,107 @@ private:
         baji_power_recovery_request_power_off();
         (void)baji_power::EnablePowerKeyWakeup();
         baji_power::CutPowerAndHoldLow();
+    }
+
+    void ResetFastBatteryProtection() {
+        fast_battery_mv_samples_.clear();
+        fast_average_battery_mv_ = 0;
+        critical_battery_low_since_us_ = 0;
+    }
+
+    void RecordFastBatterySample(int battery_mv) {
+        fast_battery_mv_samples_.push_back(static_cast<uint16_t>(battery_mv));
+        if (fast_battery_mv_samples_.size() > kFastBatteryDataCount) {
+            fast_battery_mv_samples_.erase(fast_battery_mv_samples_.begin());
+        }
+
+        uint32_t total_mv = 0;
+        for (const auto value : fast_battery_mv_samples_) {
+            total_mv += value;
+        }
+        if (!fast_battery_mv_samples_.empty()) {
+            fast_average_battery_mv_ = static_cast<int>(
+                total_mv / fast_battery_mv_samples_.size());
+        }
+    }
+
+    void TriggerCriticalBatteryShutdown() {
+        if (critical_shutdown_requested_.exchange(true)) {
+            return;
+        }
+
+        // A critical voltage is a power-integrity condition, not a UI event.
+        // Cut the latch through the independent high-priority failsafe before
+        // a brownout can reset the MCU and restart the LCD indefinitely.
+        ESP_LOGE("PowerManager",
+                 "Critical battery voltage (%d mV, fast avg %d mV); cutting power",
+                 latest_battery_mv_, fast_average_battery_mv_);
+        shutdown_requested_.store(true);
+        if (timer_handle_ != nullptr) {
+            (void)esp_timer_stop(timer_handle_);
+        }
+        if (protection_timer_handle_ != nullptr) {
+            (void)esp_timer_stop(protection_timer_handle_);
+        }
+        baji_power_recovery_request_power_off();
+        if (power_key_failsafe_task_handle_ != nullptr) {
+            xTaskNotifyGive(power_key_failsafe_task_handle_);
+        } else {
+            CutPowerImmediately();
+        }
+    }
+
+    void CheckFastBatteryProtection() {
+        if (shutdown_requested_.load()) {
+            return;
+        }
+
+        bool charging = false;
+        if (!ReadChargingStatus(charging)) {
+            return;
+        }
+
+        // Use the raw charger pin here instead of waiting for the one-second
+        // status debounce.  A newly attached USB cable must cancel an
+        // in-flight critical shutdown immediately.
+        if (charging || is_charging_.load()) {
+            ResetFastBatteryProtection();
+            return;
+        }
+
+        int battery_mv = 0;
+        if (!ReadBatteryVoltageMv(battery_mv)) {
+            return;
+        }
+
+        latest_battery_mv_ = std::clamp(battery_mv, 0, 0xFFFF);
+        RecordFastBatterySample(latest_battery_mv_);
+        // Do not wait for the one-second UI sampler to apply the load-shedding
+        // policy.  The short window is already debounced enough for the low
+        // battery hysteresis and lets the application cap the backlight within
+        // roughly one sampling interval.
+        if (fast_battery_mv_samples_.size() >= kFastLowBatteryDataCount) {
+            UpdateLowBatteryStatus();
+        }
+
+        if (fast_battery_mv_samples_.size() < kFastBatteryDataCount) {
+            return;
+        }
+
+        if (fast_average_battery_mv_ <= POWER_BATTERY_CRITICAL_VOLTAGE_MV) {
+            const int64_t now_us = esp_timer_get_time();
+            if (critical_battery_low_since_us_ == 0) {
+                critical_battery_low_since_us_ = now_us;
+            } else if (now_us - critical_battery_low_since_us_ >=
+                       static_cast<int64_t>(POWER_BATTERY_CRITICAL_CONFIRM_MS) * 1000LL) {
+                TriggerCriticalBatteryShutdown();
+            }
+        } else {
+            // Any sample above the critical threshold breaks the continuous
+            // low-voltage interval. Do not carry elapsed time across a sag
+            // followed by a partial recovery.
+            critical_battery_low_since_us_ = 0;
+        }
     }
 
     void EnterPowerOff() {
@@ -469,10 +579,10 @@ private:
             return;
         }
 
-        int saved_level = settings.GetInt("lv", battery_level_);
+        int saved_level = settings.GetInt("lv", battery_level_.load());
         saved_level = std::clamp(saved_level, 0, 100);
         persisted_battery_level_ = static_cast<uint8_t>(saved_level);
-        battery_level_ = persisted_battery_level_;
+        battery_level_.store(persisted_battery_level_);
         measured_battery_level_ = persisted_battery_level_;
         battery_state_loaded_ = true;
         is_first_battery_read_ = false;
@@ -483,7 +593,7 @@ private:
             return;
         }
 
-        if (!force && battery_state_loaded_ && battery_level_ == persisted_battery_level_) {
+        if (!force && battery_state_loaded_ && battery_level_.load() == persisted_battery_level_) {
             return;
         }
 
@@ -493,18 +603,19 @@ private:
 
         Settings settings("batt", true);
         settings.SetBool("ok", true);
-        settings.SetInt("lv", battery_level_);
+        settings.SetInt("lv", battery_level_.load());
         settings.SetInt("mv", last_average_battery_mv_);
 
-        persisted_battery_level_ = battery_level_;
+        persisted_battery_level_ = battery_level_.load();
         battery_state_loaded_ = true;
         battery_persist_seconds_ = 0;
     }
 
     void UpdateLowBatteryStatus() {
-        if (is_charging_) {
-            if (is_low_battery_) {
-                is_low_battery_ = false;
+        const bool is_charging = is_charging_.load();
+        if (is_charging) {
+            if (is_low_battery_.load()) {
+                is_low_battery_.store(false);
                 if (on_low_battery_status_changed_) {
                     on_low_battery_status_changed_(false);
                 }
@@ -512,19 +623,37 @@ private:
             return;
         }
 
-        if (battery_mv_samples_.size() < kBatteryAdcDataCount) {
+        // The long window remains the source for the displayed percentage, but
+        // protection must react before ten seconds of samples have accumulated.
+        // Require a short confirmation window so one bad ADC conversion cannot
+        // put a healthy unit into low-battery mode.
+        const bool have_fast_window =
+            fast_battery_mv_samples_.size() >= kFastLowBatteryDataCount;
+        const bool have_smooth_window = battery_mv_samples_.size() >= kBatteryAdcDataCount;
+        if (!have_fast_window && !have_smooth_window) {
             return;
         }
 
-        bool new_low_battery_status = false;
-        new_low_battery_status = is_low_battery_
-            ? measured_battery_level_ < kLowBatteryRecoverLevel
-            : measured_battery_level_ <= kLowBatteryLevel;
+        const bool voltage_low = have_fast_window &&
+            fast_average_battery_mv_ <= POWER_BATTERY_LOW_VOLTAGE_MV;
+        const bool voltage_recovered = !have_fast_window ||
+            fast_average_battery_mv_ >= POWER_BATTERY_LOW_RECOVER_VOLTAGE_MV;
+        const bool level_low = have_smooth_window && measured_battery_level_ <= kLowBatteryLevel;
+        const bool level_recovered = !have_smooth_window ||
+            measured_battery_level_ >= kLowBatteryRecoverLevel;
+        const bool old_low_battery_status = is_low_battery_.load();
+        const bool new_low_battery_status = old_low_battery_status
+            ? !(level_recovered && voltage_recovered)
+            : level_low || voltage_low;
 
-        if (new_low_battery_status != is_low_battery_) {
-            is_low_battery_ = new_low_battery_status;
+        if (new_low_battery_status != old_low_battery_status) {
+            is_low_battery_.store(new_low_battery_status);
+            ESP_LOGW("PowerManager", "Low battery protection %s (level=%u, avg=%d mV, fast=%d mV)",
+                     new_low_battery_status ? "enabled" : "disabled",
+                     static_cast<unsigned>(measured_battery_level_),
+                     last_average_battery_mv_, fast_average_battery_mv_);
             if (on_low_battery_status_changed_) {
-                on_low_battery_status_changed_(is_low_battery_);
+                on_low_battery_status_changed_(new_low_battery_status);
             }
         }
     }
@@ -559,11 +688,12 @@ private:
     }
 
     void ApplyChargingStatus(bool charging) {
-        is_charging_ = charging;
-        new_charging_status = charging;
+        is_charging_.store(charging);
+        new_charging_status_.store(charging);
         pending_charging_status_ = charging;
         charge_state_debounce_seconds_ = 0;
         battery_mv_samples_.clear();
+        ResetFastBatteryProtection();
         ticks_ = 0;
         charge_state_settle_seconds_ = kChargeStateSettleTime;
         battery_level_step_seconds_ = 0;
@@ -572,17 +702,22 @@ private:
         ReadBatteryAdcData();
         PersistBatteryState(true);
         if (on_charging_status_changed_) {
-            on_charging_status_changed_(is_charging_);
+            on_charging_status_changed_(charging);
         }
     }
 
     void CheckBatteryStatus() {
+        if (shutdown_requested_.load()) {
+            return;
+        }
+
         bool raw_charging_status = false;
         if (!ReadChargingStatus(raw_charging_status)) {
             return;
         }
 
-        if (raw_charging_status != is_charging_) {
+        const bool is_charging = is_charging_.load();
+        if (raw_charging_status != is_charging) {
             if (raw_charging_status != pending_charging_status_) {
                 pending_charging_status_ = raw_charging_status;
                 charge_state_debounce_seconds_ = 1;
@@ -595,12 +730,12 @@ private:
                 return;
             }
         } else {
-            new_charging_status = is_charging_;
-            pending_charging_status_ = is_charging_;
+            new_charging_status_.store(is_charging);
+            pending_charging_status_ = is_charging;
             charge_state_debounce_seconds_ = 0;
         }
 
-        if (raw_charging_status != is_charging_) {
+        if (raw_charging_status != is_charging) {
             return;
         }
 
@@ -614,7 +749,7 @@ private:
             battery_level_step_seconds_++;
         }
 
-        if (is_charging_ &&
+        if (is_charging &&
             measured_battery_level_ >= kNearFullLevel &&
             last_average_battery_mv_ >= kNearFullBatteryMv) {
             if (near_full_charge_seconds_ < 0xFFFF) {
@@ -642,6 +777,8 @@ private:
         }
 
         battery_mv = std::clamp(battery_mv, 0, 0xFFFF);
+        latest_battery_mv_ = battery_mv;
+        RecordFastBatterySample(battery_mv);
         battery_mv_samples_.push_back(static_cast<uint16_t>(battery_mv));
         if (battery_mv_samples_.size() > kBatteryAdcDataCount) {
             battery_mv_samples_.erase(battery_mv_samples_.begin());
@@ -654,7 +791,7 @@ private:
         last_average_battery_mv_ = static_cast<int>(average_battery_mv);
 
         measured_battery_level_ = EstimateBatteryLevelFromVoltage(last_average_battery_mv_);
-        if (is_charging_ &&
+        if (is_charging_.load() &&
             measured_battery_level_ >= kNearFullLevel &&
             last_average_battery_mv_ >= kNearFullBatteryMv &&
             near_full_charge_seconds_ >= kNearFullChargeTime) {
@@ -663,22 +800,26 @@ private:
 
         if (is_first_battery_read_) {
             is_first_battery_read_ = false;
-            battery_level_ = measured_battery_level_;
+            battery_level_.store(measured_battery_level_);
             PersistBatteryState(true);
         } else if (charge_state_settle_seconds_ == 0) {
-            if (is_charging_) {
-                if (measured_battery_level_ > battery_level_) {
+            if (is_charging_.load()) {
+                const uint8_t battery_level = battery_level_.load();
+                if (measured_battery_level_ > battery_level) {
                     if (battery_level_step_seconds_ >= kChargingLevelStepInterval) {
-                        battery_level_ = static_cast<uint8_t>(std::min<int>(battery_level_ + 1, measured_battery_level_));
+                        battery_level_.store(static_cast<uint8_t>(
+                            std::min<int>(battery_level + 1, measured_battery_level_)));
                         battery_level_step_seconds_ = 0;
                     }
                 } else {
                     battery_level_step_seconds_ = 0;
                 }
             } else {
-                if (measured_battery_level_ < battery_level_) {
+                const uint8_t battery_level = battery_level_.load();
+                if (measured_battery_level_ < battery_level) {
                     if (battery_level_step_seconds_ >= kDischargingLevelStepInterval) {
-                        battery_level_ = static_cast<uint8_t>(std::max<int>(battery_level_ - 1, measured_battery_level_));
+                        battery_level_.store(static_cast<uint8_t>(
+                            std::max<int>(battery_level - 1, measured_battery_level_)));
                         battery_level_step_seconds_ = 0;
                     }
                 } else {
@@ -707,6 +848,9 @@ private:
         if (timer_handle_) {
             (void)esp_timer_stop(timer_handle_);
         }
+        if (protection_timer_handle_) {
+            (void)esp_timer_stop(protection_timer_handle_);
+        }
 
         // Best-effort user-facing/audio handoff. The independent 5-second
         // failsafe never depends on this callback, LVGL, I2C, or audio.
@@ -722,7 +866,7 @@ private:
             charging_rtc_set_usb_shutdown_flag();
         }
 #else
-        if (new_charging_status) {
+        if (new_charging_status_.load()) {
             charging_rtc_set_usb_shutdown_flag();
         }
 #endif
@@ -820,14 +964,15 @@ public:
         ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle_, POWER_BATTERY_ADC_CHANNEL, &chan_config));
         InitAdcCalibration(POWER_CBS_ADC_UNIT, POWER_BATTERY_ADC_CHANNEL, ADC_ATTEN_DB_12);
         battery_mv_samples_.reserve(kBatteryAdcDataCount);
+        fast_battery_mv_samples_.reserve(kFastBatteryDataCount);
 #if !POWER_CHARGE_DETECT_USE_GPIO
         ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle_, POWER_USBIN_ADC_CHANNEL, &chan_config));
 #endif
 
         bool initial_charging_status = false;
         if (ReadChargingStatus(initial_charging_status)) {
-            is_charging_ = initial_charging_status;
-            new_charging_status = initial_charging_status;
+            is_charging_.store(initial_charging_status);
+            new_charging_status_.store(initial_charging_status);
             pending_charging_status_ = initial_charging_status;
         }
         LoadBatteryState();
@@ -845,6 +990,20 @@ public:
         };
         ESP_ERROR_CHECK(esp_timer_create(&timer_args, &timer_handle_));
         ESP_ERROR_CHECK(esp_timer_start_periodic(timer_handle_, 1000000));
+
+        esp_timer_create_args_t protection_timer_args = {
+            .callback = [](void* arg) {
+                auto* self = static_cast<PowerManager*>(arg);
+                self->CheckFastBatteryProtection();
+            },
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "battery_protection_timer",
+            .skip_unhandled_events = true,
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&protection_timer_args, &protection_timer_handle_));
+        ESP_ERROR_CHECK(esp_timer_start_periodic(
+            protection_timer_handle_, POWER_BATTERY_PROTECTION_SAMPLE_MS * 1000));
     }
 
     ~PowerManager() {
@@ -853,35 +1012,50 @@ public:
             power_key_failsafe_task_handle_ = nullptr;
         }
         PersistBatteryState(true);
-        DeinitAdcCalibration();
         if (timer_handle_) {
             esp_timer_stop(timer_handle_);
             esp_timer_delete(timer_handle_);
+            timer_handle_ = nullptr;
+        }
+        if (protection_timer_handle_) {
+            esp_timer_stop(protection_timer_handle_);
+            esp_timer_delete(protection_timer_handle_);
+            protection_timer_handle_ = nullptr;
         }
         if (power_timer_handle_) {
             esp_timer_stop(power_timer_handle_);
             esp_timer_delete(power_timer_handle_);
+            power_timer_handle_ = nullptr;
         }
+        DeinitAdcCalibration();
         if (adc_handle_ != nullptr) {
             adc_oneshot_del_unit(adc_handle_);
+            adc_handle_ = nullptr;
         }
     }
 
     bool IsCharging() {
-        return is_charging_;
+        return is_charging_.load();
+    }
+
+    bool IsLowBattery() const {
+        return is_low_battery_.load();
     }
 
     bool IsDischarging() {
         
-        return !is_charging_;
+        return !is_charging_.load();
     }
 
     uint8_t GetBatteryLevel() {
-        return battery_level_;
+        return battery_level_.load();
     }
 
     void OnLowBatteryStatusChanged(std::function<void(bool)> callback) {
-        on_low_battery_status_changed_ = callback;
+        on_low_battery_status_changed_ = std::move(callback);
+        if (on_low_battery_status_changed_ && is_low_battery_.load()) {
+            on_low_battery_status_changed_(true);
+        }
     }
 
     void OnChargingStatusChanged(std::function<void(bool)> callback) {

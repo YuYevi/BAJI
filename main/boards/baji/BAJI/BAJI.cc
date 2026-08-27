@@ -763,6 +763,7 @@ private:
     uint32_t application_clock_ticks_ = 0;
     bool recovery_marked_stable_ = false;
     std::atomic<bool> application_ready_{false};
+    std::atomic<bool> low_battery_protection_active_{false};
     static CustomBoard* instance_;               ///< 单例实例
 #ifndef CONFIG_BAJI_WIFI_ONLY
     std::atomic<bool> pending_4g_switch_{false}; ///< 待处理的4G切换请求
@@ -1045,8 +1046,11 @@ private:
 
     uint8_t GetCurrentBrightnessLevel() {
         auto* backlight = GetBacklight();
-        if (backlight != nullptr && backlight->brightness() > 0) {
-            return ClampBrightnessPercent(backlight->brightness());
+        if (backlight != nullptr) {
+            const uint8_t requested = backlight->requested_brightness();
+            if (requested > 0) {
+                return ClampBrightnessPercent(requested);
+            }
         }
 
         Settings settings("display");
@@ -1104,6 +1108,45 @@ private:
         }
 
         auto_power_restore_pending_ = false;
+    }
+
+    void ApplyLowBatteryProtection(bool enabled) {
+        if (enabled) {
+            bool expected = false;
+            const bool newly_enabled =
+                low_battery_protection_active_.compare_exchange_strong(expected, true);
+
+            // Stop the idle brightness timer before applying the cap.  The
+            // cap itself is enforced by Backlight, so MQTT/key requests cannot
+            // accidentally restore a high-current duty cycle while protected.
+            if (power_save_timer_ != nullptr) {
+                power_save_timer_->SetEnabled(false);
+            }
+            if (auto* backlight = GetBacklight(); backlight != nullptr) {
+                backlight->SetBrightnessLimit(POWER_BATTERY_LOW_BACKLIGHT_LIMIT, true);
+            }
+            if (newly_enabled) {
+                ESP_LOGW(TAG, "Low battery protection enabled; backlight capped at %u%%",
+                         static_cast<unsigned>(POWER_BATTERY_LOW_BACKLIGHT_LIMIT));
+            }
+            return;
+        }
+
+        if (!low_battery_protection_active_.load()) {
+            return;
+        }
+
+        // Clear the cap before re-enabling the timer. Any stale sleep callback
+        // from the protected interval is already invalidated by WakeUp's
+        // in-sleep state check and cannot overwrite this target.
+        if (auto* backlight = GetBacklight(); backlight != nullptr) {
+            backlight->SetBrightnessLimit(100, false);
+        }
+        low_battery_protection_active_.store(false);
+        if (power_save_timer_ != nullptr && power_manager_ != nullptr) {
+            power_save_timer_->SetEnabled(power_manager_->IsDischarging());
+        }
+        ESP_LOGI(TAG, "Low battery protection disabled after charge recovery");
     }
 
     bool IsApplicationBusyForNetOp() const {
@@ -2145,11 +2188,32 @@ private:
     void InitializePowerManager() {
         power_manager_ = new PowerManager(POWER_USB_IN);
         power_manager_->OnChargingStatusChanged([this](bool is_charging) {
-            if (is_charging) {
-                power_save_timer_->SetEnabled(false);
-            } else {
-                power_save_timer_->SetEnabled(true);
-            }
+            // Keep timer operations on the application task.  The battery
+            // sampler runs in esp_timer_task and can otherwise race with UI
+            // and settings requests.
+            Application::GetInstance().Schedule([this, is_charging]() {
+                if (power_manager_ == nullptr || power_save_timer_ == nullptr ||
+                    power_manager_->IsCharging() != is_charging) {
+                    return;
+                }
+                if (is_charging || low_battery_protection_active_.load()) {
+                    power_save_timer_->SetEnabled(false);
+                } else {
+                    power_save_timer_->SetEnabled(true);
+                }
+            });
+        });
+        power_manager_->OnLowBatteryStatusChanged([this](bool low_battery) {
+            // Battery callbacks run from esp_timer_task.  Defer all display
+            // and power-save operations to the application task, and discard
+            // stale edges if the charger state changes before the task runs.
+            Application::GetInstance().Schedule([this, low_battery]() {
+                if (power_manager_ == nullptr ||
+                    power_manager_->IsLowBattery() != low_battery) {
+                    return;
+                }
+                ApplyLowBatteryProtection(low_battery);
+            });
         });
         power_manager_->OnShutdownRequested([this]() {
             // Keep the failsafe path independent from the application task;
@@ -2234,24 +2298,31 @@ private:
     void InitializePowerSaveTimer() {
         power_save_timer_ = new PowerSaveTimer(-1, 60, -1);
         power_save_timer_->OnEnterSleepMode([this]() {
-            if (power_key_screen_off_) {
+            if (power_key_screen_off_ || low_battery_protection_active_.load()) {
                 return;
             }
-            display_->SetChatMessage("system", "");
-            GetBacklight()->SetBrightness(10);
+            if (display_ != nullptr) {
+                display_->SetChatMessage("system", "");
+            }
+            if (auto* backlight = GetBacklight(); backlight != nullptr) {
+                backlight->SetBrightness(10);
+            }
         });
         power_save_timer_->OnExitSleepMode([this]() {
-            if (power_key_screen_off_) {
+            if (power_key_screen_off_ || low_battery_protection_active_.load()) {
                 return;
             }
-            display_->SetChatMessage("system", "");
-            if (GetAutoPowerSaveEnabled()) {
-                GetBacklight()->SetBrightness(kAutoPowerTargetBrightness, false);
-            } else {
-                GetBacklight()->RestoreBrightness();
+            if (display_ != nullptr) {
+                display_->SetChatMessage("system", "");
+            }
+            if (auto* backlight = GetBacklight(); backlight != nullptr) {
+                if (GetAutoPowerSaveEnabled()) {
+                    backlight->SetBrightness(kAutoPowerTargetBrightness, false);
+                } else {
+                    backlight->RestoreBrightness();
+                }
             }
         });
-        power_save_timer_->SetEnabled(true);
     }
 
     /**
@@ -2402,7 +2473,8 @@ public:
     /**
      * @brief CustomBoard构造函数
      */
-    CustomBoard() {
+    CustomBoard()
+        : i2c_bus_(nullptr), display_(nullptr), power_save_timer_(nullptr), power_manager_(nullptr) {
         const BajiFactoryIdentity factory_identity = LoadBajiFactoryIdentity();
         factory_ota_role_ = factory_identity.role;
         factory_ota_network_version_ = factory_identity.network_version;
@@ -2434,6 +2506,18 @@ public:
 
     void OnApplicationReady() override {
         application_ready_.store(true);
+        if (power_manager_ != nullptr && power_manager_->IsLowBattery()) {
+            // Apply the cap before Application::Initialize restores the saved
+            // user brightness; Backlight will retain the requested value and
+            // enforce the cap until charging is stable.
+            ApplyLowBatteryProtection(true);
+        }
+        if (power_save_timer_ != nullptr && power_manager_ != nullptr &&
+            !low_battery_protection_active_.load()) {
+            // Wait until the display and board callbacks are constructed before
+            // allowing an idle-sleep callback to run during boot.
+            power_save_timer_->SetEnabled(power_manager_->IsDischarging());
+        }
 #if CONFIG_ESP_TASK_WDT_EN
         StartLvglWatchdog();
 #endif
@@ -2509,14 +2593,8 @@ public:
      * @return bool true=获取成功
      */
     virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
-        static bool last_discharging = false;
         charging = power_manager_->IsCharging();
         discharging = power_manager_->IsDischarging();
-
-        if (discharging != last_discharging) {
-            power_save_timer_->SetEnabled(discharging);
-            last_discharging = discharging;
-        }
 
         level = power_manager_->GetBatteryLevel();
         return true;
@@ -2541,7 +2619,7 @@ public:
         if (power_save_timer_ != nullptr && power_manager_ != nullptr) {
             if (!enabled) {
                 power_save_timer_->SetEnabled(false);
-            } else {
+            } else if (!low_battery_protection_active_.load()) {
                 power_save_timer_->SetEnabled(power_manager_->IsDischarging());
             }
         }
