@@ -2014,6 +2014,9 @@ private:
         }
 
         power_key_screen_off_ = false;
+        if (display_ != nullptr) {
+            display_->ShowChargingFullscreen(false);
+        }
         if (power_save_timer_) {
             power_save_timer_->WakeUp();
         }
@@ -2026,15 +2029,27 @@ private:
         return true;
     }
 
-    void TurnOffScreenFromPowerKey() {
-        if (auto* backlight = GetBacklight(); backlight != nullptr) {
-            power_key_screen_brightness_ = GetCurrentBrightnessLevel();
-            power_key_screen_off_ = true;
-            if (display_ != nullptr) {
-                display_->SetTouchEnabled(false);
-            }
-            backlight->SetBrightness(0, false);
+    void RefreshPowerKeyScreenOffUi() {
+        if (!power_key_screen_off_ || display_ == nullptr) {
+            return;
         }
+
+        // Keep the manual screen-off state consistent with the boot charging
+        // page: show the charging fullscreen whenever USB power is present.
+        const bool is_charging = power_manager_ != nullptr && power_manager_->IsCharging();
+        display_->ShowChargingFullscreen(is_charging);
+        if (auto* backlight = GetBacklight(); backlight != nullptr) {
+            backlight->SetBrightness(is_charging ? POWER_CHARGING_FULLSCREEN_BACKLIGHT : 0, false);
+        }
+    }
+
+    void TurnOffScreenFromPowerKey() {
+        power_key_screen_brightness_ = GetCurrentBrightnessLevel();
+        power_key_screen_off_ = true;
+        if (display_ != nullptr) {
+            display_->SetTouchEnabled(false);
+        }
+        RefreshPowerKeyScreenOffUi();
     }
 
     void TriggerWifiReprovision() {
@@ -2200,6 +2215,9 @@ private:
                     power_save_timer_->SetEnabled(false);
                 } else {
                     power_save_timer_->SetEnabled(true);
+                }
+                if (power_key_screen_off_) {
+                    RefreshPowerKeyScreenOffUi();
                 }
             });
         });
