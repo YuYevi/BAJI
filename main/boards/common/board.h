@@ -108,6 +108,8 @@ public:
     virtual void SetNetworkEventCallback(NetworkEventCallback callback) { (void)callback; }
     virtual const char* GetNetworkStateIcon() = 0;
     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging);
+    virtual bool IsLowBattery();
+    virtual bool IsBatteryFull();
     virtual std::string GetSystemInfoJson();
     virtual std::string GetDeviceRole();
     virtual std::string GetDeviceNetworkVersion();

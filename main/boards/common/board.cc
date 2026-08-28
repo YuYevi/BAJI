@@ -72,6 +72,14 @@ bool Board::GetBatteryLevel(int &level, bool& charging, bool& discharging) {
     return false;
 }
 
+bool Board::IsLowBattery() {
+    return false;
+}
+
+bool Board::IsBatteryFull() {
+    return false;
+}
+
 bool Board::GetAutoPowerSaveEnabled() {
     Settings settings("wifi");
     return settings.GetBool("sleep_mode", false);

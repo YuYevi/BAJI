@@ -910,7 +910,8 @@ void LcdDisplay::UpdateStatusBar(bool update_all) {
         } else if (battery_level > 100) {
             battery_level = 100;
         }
-        smartwatch_ui_runtime_set_battery(static_cast<uint8_t>(battery_level), charging);
+        smartwatch_ui_runtime_set_battery(static_cast<uint8_t>(battery_level), charging,
+                                          board.IsBatteryFull());
     }
     UpdateWifiModeSwitchButton();
 }
@@ -955,7 +956,8 @@ void LcdDisplay::HideActivationQrCode() {
         } else if (battery_level > 100) {
             battery_level = 100;
         }
-        smartwatch_ui_runtime_set_battery(static_cast<uint8_t>(battery_level), charging);
+        smartwatch_ui_runtime_set_battery(static_cast<uint8_t>(battery_level), charging,
+                                          board.IsBatteryFull());
     }
     smart_watch_ui_active_ = true;
     UpdateWifiModeSwitchButton();

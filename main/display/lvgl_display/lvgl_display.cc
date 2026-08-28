@@ -252,7 +252,9 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
                 battery_level = 100;
             }
             const lv_image_dsc_t* bat_dsc = &baji185_bat_2;
-            if (charging) {
+            if (charging && board.IsBatteryFull()) {
+                bat_dsc = &baji185_bat_4;
+            } else if (charging) {
                 bat_dsc = &baji185_bat_charge;
             } else {
                 static const lv_image_dsc_t* kBat[] = {
@@ -275,7 +277,8 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
             lv_label_set_text(battery_percent_label_, pct);
 
             if (low_battery_popup_ != nullptr && !update_all) {
-                if (battery_level <= 20 && discharging) {
+                const bool low_battery = board.IsLowBattery() || (battery_level <= 20 && discharging);
+                if (low_battery) {
                     if (lv_obj_has_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN)) {
                         lv_obj_remove_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
                         app.Schedule([&app]() {
@@ -298,7 +301,7 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
             battery_level = 100;
         }
         if (charging) {
-            icon = FONT_AWESOME_BATTERY_BOLT;
+            icon = board.IsBatteryFull() ? FONT_AWESOME_BATTERY_FULL : FONT_AWESOME_BATTERY_BOLT;
         } else {
             const char* levels[] = {
                 FONT_AWESOME_BATTERY_EMPTY, 
@@ -319,7 +322,8 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
         
         
         if (low_battery_popup_ != nullptr && !update_all) {
-            if (strcmp(icon, FONT_AWESOME_BATTERY_EMPTY) == 0 && discharging) {
+            const bool low_battery = board.IsLowBattery() || (strcmp(icon, FONT_AWESOME_BATTERY_EMPTY) == 0 && discharging);
+            if (low_battery) {
                 if (lv_obj_has_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN)) { 
                     lv_obj_remove_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
                     app.Schedule([&app]() {

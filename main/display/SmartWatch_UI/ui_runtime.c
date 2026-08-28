@@ -303,10 +303,10 @@ void smartwatch_ui_runtime_set_network_icon(const char * icon)
     app_status_set_network_icon(icon);
 }
 
-void smartwatch_ui_runtime_set_battery(uint8_t percent, bool charging)
+void smartwatch_ui_runtime_set_battery(uint8_t percent, bool charging, bool full)
 {
     if(!g_runtime_inited) return;
-    app_status_set_battery(percent, charging);
+    app_status_set_battery(percent, charging, full);
 }
 
 static void smartwatch_ui_runtime_show_notification_internal(const char * text,

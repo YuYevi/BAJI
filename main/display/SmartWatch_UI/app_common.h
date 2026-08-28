@@ -21,7 +21,7 @@ void app_status_bar_init(app_status_bar_t * bar, lv_obj_t * parent);
 void app_status_bar_deinit(app_status_bar_t * bar);
 
 void app_status_set_network_icon(const char * icon);
-void app_status_set_battery(uint8_t percent, bool charging);
+void app_status_set_battery(uint8_t percent, bool charging, bool full);
 
 void app_status_overlay_init(void);
 void app_status_overlay_deinit(void);

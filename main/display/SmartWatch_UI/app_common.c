@@ -10,6 +10,7 @@ extern const lv_font_t font_awesome_14_1;
 static const char * g_network_icon = FONT_AWESOME_WIFI;
 static uint8_t g_battery_percent = 100;
 static bool g_battery_charging = false;
+static bool g_battery_full = false;
 
 static app_status_bar_t * g_bars[16];
 static uint8_t g_bar_count;
@@ -260,10 +261,10 @@ static bool is_cellular_strength_icon(const char * icon)
            strcmp(icon, FONT_AWESOME_SIGNAL_WEAK) == 0;
 }
 
-static const char * battery_symbol_for(uint8_t percent, bool charging)
+static const char * battery_symbol_for(uint8_t percent, bool charging, bool full)
 {
     (void)charging;
-    if(percent >= 80) return LV_SYMBOL_BATTERY_FULL;
+    if(full || percent >= 80) return LV_SYMBOL_BATTERY_FULL;
     if(percent >= 60) return LV_SYMBOL_BATTERY_3;
     if(percent >= 40) return LV_SYMBOL_BATTERY_2;
     if(percent >= 20) return LV_SYMBOL_BATTERY_1;
@@ -279,9 +280,9 @@ static void status_bar_apply(app_status_bar_t * bar)
     // status-bar font. Keep the online network indicators centered; the
     // slash/off glyphs already share the Wi-Fi slash baseline.
     lv_obj_set_style_translate_y(bar->wifi, is_cellular_strength_icon(network_icon) ? -1 : 0, 0);
-    lv_label_set_text(bar->battery, battery_symbol_for(g_battery_percent, g_battery_charging));
+    lv_label_set_text(bar->battery, battery_symbol_for(g_battery_percent, g_battery_charging, g_battery_full));
     
-    if(g_battery_charging) {
+    if(g_battery_charging && !g_battery_full) {
         lv_obj_remove_flag(bar->charging, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(bar->charging, LV_OBJ_FLAG_HIDDEN);
@@ -390,10 +391,11 @@ void app_status_set_network_icon(const char * icon)
     }
 }
 
-void app_status_set_battery(uint8_t percent, bool charging)
+void app_status_set_battery(uint8_t percent, bool charging, bool full)
 {
     g_battery_percent = percent;
     g_battery_charging = charging;
+    g_battery_full = full;
     for(uint8_t i = 0; i < g_bar_count; i++) {
         status_bar_apply(g_bars[i]);
     }

@@ -183,7 +183,10 @@ static bool PauseBleBindModeBeforeCloudCheck(Board& board) {
     return true;
 }
 
-static const char* BatteryStateToMqttString(bool charging, bool discharging) {
+static const char* BatteryStateToMqttString(bool charging, bool discharging, bool full) {
+    if (full) {
+        return "full";
+    }
     if (charging) {
         return "charging";
     }
@@ -235,9 +238,13 @@ static cJSON* BuildMqttDeviceInfoResult() {
     bool charging = false;
     bool discharging = false;
     if (board.GetBatteryLevel(battery_level, charging, discharging)) {
+        const bool low_battery = board.IsLowBattery();
+        const bool battery_full = board.IsBatteryFull();
         cJSON_AddNumberToObject(root, "battery_level", battery_level);
+        cJSON_AddBoolToObject(root, "battery_low", low_battery);
+        cJSON_AddBoolToObject(root, "battery_full", battery_full);
         cJSON_AddStringToObject(root, "battery_status",
-                                BatteryStateToMqttString(charging, discharging));
+                                BatteryStateToMqttString(charging, discharging, battery_full));
     }
 
     esp_chip_info_t chip_info;
@@ -2588,6 +2595,8 @@ void Application::PublishMqttTelemetry() {
             cJSON_AddNumberToObject(battery, "level", battery_level);
             cJSON_AddBoolToObject(battery, "charging", charging);
             cJSON_AddBoolToObject(battery, "discharging", discharging);
+            cJSON_AddBoolToObject(battery, "low", board.IsLowBattery());
+            cJSON_AddBoolToObject(battery, "full", board.IsBatteryFull());
             cJSON_AddItemToObject(root, "battery", battery);
         }
     }

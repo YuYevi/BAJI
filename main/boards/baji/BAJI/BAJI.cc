@@ -2600,6 +2600,14 @@ public:
         return true;
     }
 
+    bool IsLowBattery() override {
+        return power_manager_ != nullptr && power_manager_->IsLowBattery();
+    }
+
+    bool IsBatteryFull() override {
+        return power_manager_ != nullptr && power_manager_->IsBatteryFull();
+    }
+
     bool GetAutoPowerSaveEnabled() override {
         Settings settings("wifi");
         return settings.GetBool("sleep_mode", false);

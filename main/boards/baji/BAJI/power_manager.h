@@ -48,6 +48,7 @@ private:
     uint8_t persisted_battery_level_ = 30;
     std::atomic<bool> is_charging_{false};
     std::atomic<bool> is_low_battery_{false};
+    std::atomic<bool> is_battery_full_{false};
     bool is_first_battery_read_ = true;
     bool battery_state_loaded_ = false;
     int ticks_ = 0;
@@ -92,16 +93,19 @@ private:
     static constexpr int kBatteryFallbackFullScaleMv = 3900;
     static constexpr float kBatteryDividerRatio = 2.0f;  // R8=200k, R13=200k in the BAJI netlist.
     static constexpr int kBatteryPersistIntervalSeconds = 180;
-    static constexpr int kLowBatteryLevel = 20;
-    static constexpr int kLowBatteryRecoverLevel = 25;
-    static constexpr int kChargeStateSettleTime = 20;
-    static constexpr int kChargeStateDebounceTime = 2;
+    static constexpr int kLowBatteryLevel = POWER_BATTERY_LOW_LEVEL_PERCENT;
+    static constexpr int kLowBatteryRecoverLevel = POWER_BATTERY_LOW_RECOVER_LEVEL_PERCENT;
+    static constexpr int kChargeStateSettleTime = POWER_BATTERY_CHARGE_SETTLE_SECONDS;
+    static constexpr int kChargeStateDebounceTime = POWER_BATTERY_CHARGE_DEBOUNCE_SECONDS;
     static constexpr int kChargingLevelStepInterval = 12;
     static constexpr int kDischargingLevelStepInterval = 20;
     // Require a little headroom before declaring "full" on charge.
-    static constexpr int kNearFullBatteryMv = 4050;
-    static constexpr int kNearFullChargeTime = 180;
-    static constexpr int kNearFullLevel = 95;
+    static constexpr int kNearFullBatteryMv = POWER_BATTERY_FULL_VOLTAGE_MV;
+    static constexpr int kNearFullReleaseBatteryMv = POWER_BATTERY_FULL_RELEASE_VOLTAGE_MV;
+    static constexpr int kNearFullChargeTime = POWER_BATTERY_FULL_CONFIRM_SECONDS;
+    static constexpr int kNearFullLevel = POWER_BATTERY_FULL_LEVEL_PERCENT;
+    static constexpr int kBatteryChargeReportBiasMv = POWER_BATTERY_CHARGE_REPORTING_BIAS_MV;
+    static constexpr int kBatteryTransitionSeedSamples = POWER_BATTERY_TRANSITION_SEED_SAMPLES;
     static constexpr int kFastLowBatteryDataCount = 3;
     static constexpr int kFastBatteryDataCount = 4;
 
@@ -164,6 +168,25 @@ private:
         fast_battery_mv_samples_.clear();
         fast_average_battery_mv_ = 0;
         critical_battery_low_since_us_ = 0;
+    }
+
+    void PrimeBatteryHistory(int battery_mv) {
+        if (battery_mv <= 0) {
+            return;
+        }
+
+        const uint16_t seed_mv = static_cast<uint16_t>(std::clamp(battery_mv, 0, 0xFFFF));
+        battery_mv_samples_.clear();
+        battery_mv_samples_.reserve(kBatteryAdcDataCount);
+
+        const size_t seed_count = std::min<size_t>(
+            static_cast<size_t>(kBatteryTransitionSeedSamples),
+            static_cast<size_t>(kBatteryAdcDataCount));
+        for (size_t i = 0; i < seed_count; ++i) {
+            battery_mv_samples_.push_back(seed_mv);
+        }
+
+        last_average_battery_mv_ = static_cast<int>(seed_mv);
     }
 
     void RecordFastBatterySample(int battery_mv) {
@@ -585,7 +608,6 @@ private:
         battery_level_.store(persisted_battery_level_);
         measured_battery_level_ = persisted_battery_level_;
         battery_state_loaded_ = true;
-        is_first_battery_read_ = false;
     }
 
     void PersistBatteryState(bool force = false) {
@@ -692,15 +714,17 @@ private:
         new_charging_status_.store(charging);
         pending_charging_status_ = charging;
         charge_state_debounce_seconds_ = 0;
-        battery_mv_samples_.clear();
+        is_battery_full_.store(false);
+        const int transition_seed_mv =
+            last_average_battery_mv_ > 0 ? last_average_battery_mv_ : latest_battery_mv_;
+        PrimeBatteryHistory(transition_seed_mv);
         ResetFastBatteryProtection();
         ticks_ = 0;
         charge_state_settle_seconds_ = kChargeStateSettleTime;
         battery_level_step_seconds_ = 0;
         near_full_charge_seconds_ = 0;
         battery_persist_seconds_ = 0;
-        ReadBatteryAdcData();
-        PersistBatteryState(true);
+        UpdateLowBatteryStatus();
         if (on_charging_status_changed_) {
             on_charging_status_changed_(charging);
         }
@@ -749,8 +773,9 @@ private:
             battery_level_step_seconds_++;
         }
 
+        const uint8_t raw_estimated_level = EstimateBatteryLevelFromVoltage(last_average_battery_mv_);
         if (is_charging &&
-            measured_battery_level_ >= kNearFullLevel &&
+            raw_estimated_level >= kNearFullLevel &&
             last_average_battery_mv_ >= kNearFullBatteryMv) {
             if (near_full_charge_seconds_ < 0xFFFF) {
                 near_full_charge_seconds_++;
@@ -790,12 +815,29 @@ private:
         average_battery_mv /= battery_mv_samples_.size();
         last_average_battery_mv_ = static_cast<int>(average_battery_mv);
 
-        measured_battery_level_ = EstimateBatteryLevelFromVoltage(last_average_battery_mv_);
-        if (is_charging_.load() &&
-            measured_battery_level_ >= kNearFullLevel &&
+        const bool charging = is_charging_.load();
+        const uint8_t raw_estimated_level = EstimateBatteryLevelFromVoltage(last_average_battery_mv_);
+        const int reported_battery_mv = charging
+            ? std::max(0, last_average_battery_mv_ - kBatteryChargeReportBiasMv)
+            : last_average_battery_mv_;
+        measured_battery_level_ = EstimateBatteryLevelFromVoltage(reported_battery_mv);
+
+        const bool full_charge_entered = charging &&
+            raw_estimated_level >= kNearFullLevel &&
             last_average_battery_mv_ >= kNearFullBatteryMv &&
-            near_full_charge_seconds_ >= kNearFullChargeTime) {
+            near_full_charge_seconds_ >= kNearFullChargeTime;
+        const bool full_charge_released = !charging ||
+            last_average_battery_mv_ <= kNearFullReleaseBatteryMv;
+        const bool was_battery_full = is_battery_full_.load();
+        const bool battery_full = was_battery_full ? !full_charge_released : full_charge_entered;
+        is_battery_full_.store(battery_full);
+        if (battery_full) {
             measured_battery_level_ = 100;
+            battery_level_.store(100);
+            battery_level_step_seconds_ = 0;
+            if (!was_battery_full) {
+                PersistBatteryState(true);
+            }
         }
 
         if (is_first_battery_read_) {
@@ -803,7 +845,7 @@ private:
             battery_level_.store(measured_battery_level_);
             PersistBatteryState(true);
         } else if (charge_state_settle_seconds_ == 0) {
-            if (is_charging_.load()) {
+            if (charging) {
                 const uint8_t battery_level = battery_level_.load();
                 if (measured_battery_level_ > battery_level) {
                     if (battery_level_step_seconds_ >= kChargingLevelStepInterval) {
@@ -1040,6 +1082,10 @@ public:
 
     bool IsLowBattery() const {
         return is_low_battery_.load();
+    }
+
+    bool IsBatteryFull() const {
+        return is_battery_full_.load();
     }
 
     bool IsDischarging() {
