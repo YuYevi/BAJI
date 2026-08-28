@@ -20,7 +20,7 @@
 #include "esp_audio_types.h"
 
 #include "audio_codec.h"
-#include "audio_processor.h"
+#include "audio_engine.h"
 #include "processors/audio_debugger.h"
 #include "wake_word.h"
 #include "protocol.h"
@@ -46,6 +46,7 @@
 #define AS_EVENT_AUDIO_INPUT_STOPPED         (1 << 4)
 #define AS_EVENT_AUDIO_OUTPUT_STOPPED        (1 << 5)
 #define AS_EVENT_OPUS_CODEC_STOPPED          (1 << 6)
+#define AS_EVENT_AUDIO_INPUT_STOP_REQUEST    (1 << 7)
 #define AS_EVENT_SERVICE_TASKS_STOPPED       (AS_EVENT_AUDIO_INPUT_STOPPED | \
                                               AS_EVENT_AUDIO_OUTPUT_STOPPED | \
                                               AS_EVENT_OPUS_CODEC_STOPPED)
@@ -139,13 +140,12 @@ public:
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
     void SetModelsList(srmodel_list_t* models_list);
-    WakeWord* GetWakeWord() { return wake_word_.get(); }
+    WakeWord* GetWakeWord();
 
 private:
     AudioCodec* codec_ = nullptr;
     AudioServiceCallbacks callbacks_;
-    std::unique_ptr<AudioProcessor> audio_processor_;
-    std::unique_ptr<WakeWord> wake_word_;
+    std::unique_ptr<AudioEngine> audio_engine_;
     std::unique_ptr<AudioDebugger> audio_debugger_;
     void* opus_encoder_ = nullptr;
     void* opus_decoder_ = nullptr;
@@ -186,11 +186,15 @@ private:
     
     std::deque<uint32_t> timestamp_queue_;
 
-    bool wake_word_initialized_ = false;
-    bool audio_processor_initialized_ = false;
+    bool audio_engine_initialized_ = false;
     bool voice_detected_ = false;
+#if CONFIG_USE_DEVICE_AEC
+    bool device_aec_enabled_ = true;
+#else
+    bool device_aec_enabled_ = false;
+#endif
     std::atomic_bool service_stopped_{true};
-    bool audio_input_need_warmup_ = false;
+    std::atomic_bool audio_input_need_warmup_{false};
     int64_t last_encode_drop_log_time_ = 0;
 
     esp_timer_handle_t audio_power_timer_ = nullptr;
@@ -204,6 +208,7 @@ private:
     static void AudioOutputTaskEntry(void* arg);
     static void OpusCodecTaskEntry(void* arg);
     void PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm);
+    bool InitializeAudioEngine();
     void SetDecodeSampleRate(int sample_rate, int frame_duration);
     bool IsPlaybackDrainedLocked() const;
     bool MarkPlaybackDrainedLocked();
