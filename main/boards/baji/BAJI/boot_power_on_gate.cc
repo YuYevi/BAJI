@@ -50,6 +50,7 @@ extern "C" void board_boot_power_on_gate(void)
     const BajiPowerRecoveryAction recovery_action =
         baji_power_recovery_action(reset_reason);
     if (recovery_action == BajiPowerRecoveryAction::KeepPower) {
+        baji_power_recovery_mark_boot_validated();
         baji_power::KeepPowerOnAcrossReset();
         return;
     }

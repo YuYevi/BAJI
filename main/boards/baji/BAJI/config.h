@@ -57,12 +57,10 @@
 
 // Fast battery protection is intentionally separate from the smoothed UI
 // percentage.  Tune these values against the assembled battery/PMIC.
-#define POWER_BATTERY_LOW_VOLTAGE_MV             3500
 #define POWER_BATTERY_LOW_RECOVER_VOLTAGE_MV     3600
 #define POWER_BATTERY_CRITICAL_VOLTAGE_MV        3250
 #define POWER_BATTERY_PROTECTION_SAMPLE_MS       250
 #define POWER_BATTERY_CRITICAL_CONFIRM_MS        2000
-#define POWER_BATTERY_LOW_BACKLIGHT_LIMIT        20
 #define POWER_BATTERY_LOW_LEVEL_PERCENT          20
 #define POWER_BATTERY_LOW_RECOVER_LEVEL_PERCENT  25
 #define POWER_BATTERY_CHARGE_DEBOUNCE_SECONDS    2

@@ -41,6 +41,7 @@ void smartwatch_ui_runtime_set_emotion(const char * emotion);
 
 void smartwatch_ui_runtime_set_network_icon(const char * icon);
 void smartwatch_ui_runtime_set_battery(uint8_t percent, bool charging, bool full);
+void smartwatch_ui_runtime_set_low_battery_warning(const char * text, bool visible);
 void smartwatch_ui_runtime_show_notification(const char * text, uint32_t duration_ms);
 void smartwatch_ui_runtime_show_top_notification(const char * text);
 bool smartwatch_ui_runtime_is_sound_idle(void);

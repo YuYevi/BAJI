@@ -145,7 +145,6 @@ void smartwatch_ui_runtime_deinit(void)
         g_bottom_toast_root = NULL;
         g_bottom_toast_label = NULL;
     }
-
     smartwatch_ui_runtime_wallpaper_reset();
     ui_destroy();
     smartwatch_ui_runtime_reset_remote_ai_chat_mjpeg_cache();
@@ -307,6 +306,16 @@ void smartwatch_ui_runtime_set_battery(uint8_t percent, bool charging, bool full
 {
     if(!g_runtime_inited) return;
     app_status_set_battery(percent, charging, full);
+}
+
+void smartwatch_ui_runtime_set_low_battery_warning(const char * text, bool visible)
+{
+    if(!g_runtime_inited) return;
+    // Reuse the original top notification bar. A zero duration pauses its
+    // auto-hide timer, so the warning remains visible until this method is
+    // called again with visible=false.
+    smartwatch_ui_runtime_show_top_notification(
+        visible && text && text[0] != '\0' ? text : NULL);
 }
 
 static void smartwatch_ui_runtime_show_notification_internal(const char * text,

@@ -11,6 +11,7 @@ static const char * g_network_icon = FONT_AWESOME_WIFI;
 static uint8_t g_battery_percent = 100;
 static bool g_battery_charging = false;
 static bool g_battery_full = false;
+static bool g_battery_valid;
 
 static app_status_bar_t * g_bars[16];
 static uint8_t g_bar_count;
@@ -280,6 +281,15 @@ static void status_bar_apply(app_status_bar_t * bar)
     // status-bar font. Keep the online network indicators centered; the
     // slash/off glyphs already share the Wi-Fi slash baseline.
     lv_obj_set_style_translate_y(bar->wifi, is_cellular_strength_icon(network_icon) ? -1 : 0, 0);
+    if(!g_battery_valid) {
+        lv_label_set_text(bar->battery, LV_SYMBOL_BATTERY_EMPTY);
+        lv_obj_add_flag(bar->charging, LV_OBJ_FLAG_HIDDEN);
+        if(bar->battery_pct) {
+            lv_label_set_text(bar->battery_pct, "--%");
+        }
+        return;
+    }
+
     lv_label_set_text(bar->battery, battery_symbol_for(g_battery_percent, g_battery_charging, g_battery_full));
     
     if(g_battery_charging && !g_battery_full) {
@@ -396,6 +406,7 @@ void app_status_set_battery(uint8_t percent, bool charging, bool full)
     g_battery_percent = percent;
     g_battery_charging = charging;
     g_battery_full = full;
+    g_battery_valid = true;
     for(uint8_t i = 0; i < g_bar_count; i++) {
         status_bar_apply(g_bars[i]);
     }

@@ -45,6 +45,8 @@ LV_FONT_DECLARE(font_awesome_30_4);
 extern "C" void baji_lcd_te_attach_display(lv_display_t* display) __attribute__((weak));
 
 namespace {
+constexpr int kPersistentLowBatteryLevelPercent = 10;
+
 bool ShouldEnterSmartWatchAiChat(DeviceState state) {
     return state == kDeviceStateConnecting ||
            state == kDeviceStateListening ||
@@ -912,6 +914,12 @@ void LcdDisplay::UpdateStatusBar(bool update_all) {
         }
         smartwatch_ui_runtime_set_battery(static_cast<uint8_t>(battery_level), charging,
                                           board.IsBatteryFull());
+        const bool low_battery =
+            battery_level <= kPersistentLowBatteryLevelPercent && discharging;
+        smartwatch_ui_runtime_set_low_battery_warning(
+            low_battery ? Lang::Strings::BATTERY_NEED_CHARGE : nullptr, low_battery);
+    } else {
+        smartwatch_ui_runtime_set_low_battery_warning(nullptr, false);
     }
     UpdateWifiModeSwitchButton();
 }

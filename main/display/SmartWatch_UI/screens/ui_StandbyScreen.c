@@ -43,7 +43,7 @@ static lv_point_t standby_press_start;
 static wallpaper_mode_t standby_current_mode = WALLPAPER_MODE_TRIPLE;
 static const uint32_t kStandbyCarouselIntervalMs = 2000;
 
-#define STANDBY_SWIPE_TRIGGER_PX  40
+#define STANDBY_SWIPE_TRIGGER_PX  20
 #define STANDBY_WAKE_BUTTON_WIDTH  104
 #define STANDBY_WAKE_BUTTON_HEIGHT 42
 

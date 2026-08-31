@@ -22,6 +22,7 @@
 #define TAG "Display"
 
 namespace {
+constexpr int kPersistentLowBatteryLevelPercent = 10;
 constexpr uint32_t kActivationPromptWaitIntervalMs = 550;
 constexpr const char* kActivationWaitingPrefix =
     "\xE7\xAD\x89\xE5\xBE\x85\xE6\xBF\x80\xE6\xB4\xBB\xE4\xB8\xAD";
@@ -277,7 +278,7 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
             lv_label_set_text(battery_percent_label_, pct);
 
             if (low_battery_popup_ != nullptr && !update_all) {
-                const bool low_battery = board.IsLowBattery() || (battery_level <= 20 && discharging);
+                const bool low_battery = battery_level <= kPersistentLowBatteryLevelPercent && discharging;
                 if (low_battery) {
                     if (lv_obj_has_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN)) {
                         lv_obj_remove_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
@@ -322,7 +323,7 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
         
         
         if (low_battery_popup_ != nullptr && !update_all) {
-            const bool low_battery = board.IsLowBattery() || (strcmp(icon, FONT_AWESOME_BATTERY_EMPTY) == 0 && discharging);
+            const bool low_battery = battery_level <= kPersistentLowBatteryLevelPercent && discharging;
             if (low_battery) {
                 if (lv_obj_has_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN)) { 
                     lv_obj_remove_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);

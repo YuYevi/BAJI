@@ -12,6 +12,7 @@ constexpr uint32_t kRecoveryMagic = 0x42505243u;
 RTC_NOINIT_ATTR volatile uint32_t s_recovery_magic;
 RTC_NOINIT_ATTR volatile uint32_t s_consecutive_fault_resets;
 RTC_NOINIT_ATTR volatile uint32_t s_power_off_pending;
+bool s_boot_hold_validated;
 
 bool IsFaultReset(esp_reset_reason_t reason) {
     switch (reason) {
@@ -44,6 +45,7 @@ void ClearRecoveryState() {
     s_recovery_magic = 0;
     s_consecutive_fault_resets = 0;
     s_power_off_pending = 0;
+    s_boot_hold_validated = false;
     s_recovery_magic = kRecoveryMagic;
 }
 
@@ -117,6 +119,17 @@ void baji_power_recovery_request_power_off() {
 
 void baji_power_recovery_allow_boot() {
     ClearRecoveryState();
+    s_boot_hold_validated = true;
+}
+
+void baji_power_recovery_mark_boot_validated() {
+    s_boot_hold_validated = true;
+}
+
+bool baji_power_recovery_consume_boot_validated() {
+    const bool validated = s_boot_hold_validated;
+    s_boot_hold_validated = false;
+    return validated;
 }
 
 void baji_power_recovery_mark_stable() {
